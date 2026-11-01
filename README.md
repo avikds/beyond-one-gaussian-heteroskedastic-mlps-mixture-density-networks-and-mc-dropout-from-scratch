@@ -41,6 +41,56 @@ python scaffold.py
 - [x] **29.** uncertainty_split
 - [x] **30.** beyond_one_gaussian_report
 
----
+## Results
 
-Built on Deep-ML.
+```
+1. Growing noise, Figure 13.6 (1000 training points, 5000 test points)
+   true density                 NLL 0.685   [0.67-0.69]
+   fixed sigma (13.6b)          NLL 0.965   [0.93-0.97]   overall 90% coverage 0.895, width 2.02
+   two heads (eq 13.21, 13.6a)  NLL 0.719   [0.70-0.72]   overall 90% coverage 0.881, width 1.78
+   learned sigma vs the truth: RMSE 0.061   mean vs the truth: fixed 0.181, two heads 0.149
+   90% interval coverage by region of x:
+   region            fixed sigma   two heads   two-head width
+   [ -20,    0)          0.998       0.899        0.74
+   [   0,   20)          0.966       0.881        1.44
+   [  20,   40)          0.862       0.871        2.14
+   [  40,   60)          0.750       0.873        2.83
+   The fixed sigma looks calibrated overall and is wrong in every region: too wide on the left, too narrow on the right.
+
+2. One-to-many inverse problem, Figure 13.23 (1000 training points, 5000 test points)
+   true density                 NLL -1.258   [-1.29 to -1.25]
+   one Gaussian (eq 13.21)            NLL -0.577   [-0.62 to -0.57]
+   3 Gaussians, deep ensemble         NLL -0.578   [-0.62 to -0.57]
+   one Gaussian, MC dropout           NLL -0.546   [-0.58 to -0.54]
+   3 linear experts by EM             NLL -0.889   [-0.93 to -0.89]
+   2-level tree of 4 linear experts   NLL -0.895   [-0.98 to -0.89]
+   MDN, K = 2                         NLL -1.042   [-1.09 to -1.03]
+   MDN, K = 3                         NLL -1.085   [-1.13 to -1.07]
+   MDN, K = 5                         NLL -1.069   [-1.12 to -1.05]
+   Ensembles and dropout do not help: every member learns the same blurry average.
+
+   Point predictions (Figure 13.23d): RMSE, and how often the prediction is a value that can occur
+   linear experts   mean: RMSE 0.217, possible 0.429    most active expert: RMSE 0.245, possible 0.982
+   MDN, K = 3       mean: RMSE 0.205, possible 0.783    most active expert: RMSE 0.254, possible 0.999
+   The mean always wins on squared error. The most active expert wins on landing where data can occur.
+
+   Shortest 90% sets (HPD, eqs 4.193-4.194):
+   one Gaussian: length 0.586, coverage 0.910
+   MDN, K = 3:   length 0.330, coverage 0.896   (its central 90% interval has width 0.520)
+   true density: length 0.332
+
+3. 200 points and a hole at 10 < x < 25: marginalizing over models (eqs 13.96-13.97)
+   dropout rate chosen on held-out likelihood: 0.003
+   model            NLL outside the hole          NLL inside   90% coverage inside
+   one network        0.817   [0.72-2.08]         1.13       0.725
+   5-member ensemble  0.790   [0.71-1.72]         1.02       0.798
+   MC dropout         0.759   [0.76-0.97]         1.66       0.643
+   weight scaling     0.758   [0.76-0.95]         1.72       0.636
+   Model uncertainty (standard deviation of the means), inside vs outside the hole:
+   ensemble     0.103 vs 0.049, ratio 2.09
+   MC dropout   0.104 vs 0.104, ratio 1.00
+   Over 20 data seeds that ratio has median 3.2 for the ensemble (2.0-11.9) and 1.02 for MC dropout (0.83-1.18): only the ensemble notices the hole.
+   Neither is honest there: on average their 90% intervals cover 65% (ensemble) and 58% (MC dropout) inside the hole.
+
+study finished in 435 s
+```
