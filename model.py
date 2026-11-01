@@ -1996,3 +1996,95 @@ def fit_mdn(x, y, K=3, hidden=(32, 32), steps=1000, lr=0.01, seed=0):
 
     return predict
 
+# Step 23 - density_set_report
+def density_set_report(y, w, mu, sigma, grid, level=0.9):
+    y = np.asarray(y, dtype=np.float64).reshape(-1)
+    w = np.asarray(w, dtype=np.float64)
+    mu = np.asarray(mu, dtype=np.float64)
+    sigma = np.asarray(sigma, dtype=np.float64)
+    grid = np.asarray(grid, dtype=np.float64).reshape(-1)
+
+    if w.ndim != 2 or mu.shape != w.shape or sigma.shape != w.shape:
+        raise ValueError("w, mu, and sigma must have shape (n, K)")
+    if y.shape != (w.shape[0],):
+        raise ValueError("y must have shape (n,)")
+    if grid.size < 2:
+        raise ValueError("grid must contain at least two points")
+    if not np.all(np.diff(grid) > 0):
+        raise ValueError("grid must be strictly increasing")
+    if np.any(sigma <= 0) or not np.all(np.isfinite(sigma)):
+        raise ValueError("sigma must be finite and positive")
+    if not 0.0 < level <= 1.0:
+        raise ValueError("level must be in (0, 1]")
+
+    n = y.size
+    dz = float(grid[1] - grid[0])
+
+    # Evaluate each row in chunks to limit memory use.
+    thresholds = np.empty(n, dtype=np.float64)
+    lengths = np.empty(n, dtype=np.float64)
+
+    for start in range(0, n, 500):
+        end = min(start + 500, n)
+
+        # Mixture density on the grid: (chunk, grid_size, K).
+        z = (
+            grid[None, :, None]
+            - mu[start:end, None, :]
+        ) / sigma[start:end, None, :]
+
+        component_density = (
+            w[start:end, None, :]
+            * np.exp(-0.5 * z**2)
+            / (
+                np.sqrt(2.0 * np.pi)
+                * sigma[start:end, None, :]
+            )
+        )
+
+        density = np.sum(component_density, axis=2)
+
+        # Sort grid densities from highest to lowest.
+        sorted_density = np.sort(density, axis=1)[:, ::-1]
+
+        # Approximate cumulative probability mass on the grid.
+        cumulative_mass = np.cumsum(sorted_density * dz, axis=1)
+
+        # First density threshold reaching the requested mass.
+        reached = cumulative_mass >= level
+        first_index = np.argmax(reached, axis=1)
+
+        threshold = sorted_density[
+            np.arange(end - start),
+            first_index,
+        ]
+
+        thresholds[start:end] = threshold
+
+        # Highest-density set length = number of selected grid
+        # points multiplied by the grid spacing.
+        lengths[start:end] = (
+            np.sum(density >= threshold[:, None], axis=1) * dz
+        )
+
+    # Evaluate the observed target's own mixture density.
+    observed_log_density = mixture_logpdf(
+        y,
+        w,
+        mu,
+        sigma,
+    )
+    observed_density = np.exp(observed_log_density)
+
+    # An observation is covered when its density reaches
+    # the row-specific highest-density threshold.
+    coverage = float(
+        np.mean(observed_density >= thresholds)
+    )
+
+    return {
+        "level": float(level),
+        "coverage": coverage,
+        "length": float(np.mean(lengths)),
+    }
+
