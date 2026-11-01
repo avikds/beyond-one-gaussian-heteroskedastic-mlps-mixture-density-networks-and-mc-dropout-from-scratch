@@ -763,3 +763,69 @@ def fit(params, loss_fn, X, Y, steps=1000, lr=0.01,
 
     return history
 
+# Step 9 - mixture_logpdf
+def mixture_logpdf(y, w, mu, sigma):
+    """
+    Compute the log probability density of a per-input Gaussian mixture.
+
+    Parameters
+    ----------
+    y : np.ndarray
+        Observations of shape (n,).
+
+    w : np.ndarray
+        Mixture weights of shape (n, K).
+        Each row contains non-negative weights summing to 1.
+
+    mu : np.ndarray
+        Gaussian component means of shape (n, K).
+
+    sigma : np.ndarray
+        Gaussian component standard deviations of shape (n, K).
+
+    Returns
+    -------
+    np.ndarray
+        Log densities of shape (n,), with dtype float64.
+    """
+
+    # Convert all inputs to float64 for numerical accuracy.
+    y = np.asarray(y, dtype=np.float64)
+    w = np.asarray(w, dtype=np.float64)
+    mu = np.asarray(mu, dtype=np.float64)
+    sigma = np.asarray(sigma, dtype=np.float64)
+
+    # Calculate log mixture weights.
+    # Zero weights correspond to log probability = -inf.
+    # This removes those components without producing NaN values.
+    log_w = np.full(w.shape, -np.inf, dtype=np.float64)
+
+    np.log(w, out=log_w, where=(w > 0))
+
+    # Calculate standardized residuals for each Gaussian component.
+    z = (y[:, None] - mu) / sigma
+
+    # Calculate the log density of each weighted Gaussian component.
+    log_components = (
+        log_w
+        - np.log(sigma)
+        - 0.5 * np.log(2.0 * np.pi)
+        - 0.5 * z**2
+    )
+
+    # Numerically stable Log-Sum-Exp calculation.
+    # Subtract the maximum before exponentiation to avoid underflow.
+    max_log = np.max(log_components, axis=1, keepdims=True)
+
+    log_density = (
+        max_log[:, 0]
+        + np.log(
+            np.sum(
+                np.exp(log_components - max_log),
+                axis=1
+            )
+        )
+    )
+
+    return log_density.astype(np.float64, copy=False)
+

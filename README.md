@@ -18,6 +18,7 @@ python scaffold.py
 - [x] **6.** DenseNet
 - [x] **7.** Adam
 - [x] **8.** fit
+- [x] **9.** mixture_logpdf
 
 ---
 
