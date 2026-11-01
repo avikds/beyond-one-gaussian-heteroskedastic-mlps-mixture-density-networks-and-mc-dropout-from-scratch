@@ -1790,3 +1790,29 @@ def point_report(x, y, w, mu):
         "support_mode": support_mode,
     }
 
+# Step 20 - mdn_nll
+def mdn_nll(y, logits, mu, sigma):
+    # Log mixture weights.
+    log_gate = logits.log_softmax(axis=1)
+
+    # Gaussian log-density for every observation and component.
+    log_gaussian = (
+        -0.5 * math.log(2.0 * math.pi)
+        - sigma.log()
+        - 0.5 * ((y.reshape(-1, 1) - mu) / sigma) ** 2
+    )
+
+    # Joint log-probability of each component.
+    log_joint = log_gate + log_gaussian
+
+    # Stable log-sum-exp. Detach the maximum so it does not
+    # contribute to the gradient.
+    max_log = log_joint.max(axis=1, keepdim=True).detach()
+    log_prob = (
+        max_log
+        + (log_joint - max_log).exp().sum(axis=1, keepdim=True).log()
+    )
+
+    # Mean negative log-likelihood across observations.
+    return -log_prob.mean()
+
