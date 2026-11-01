@@ -38,6 +38,7 @@ python scaffold.py
 - [x] **26.** mc_dropout_predict
 - [x] **27.** tune_dropout_rate
 - [x] **28.** fit_ensemble
+- [x] **29.** uncertainty_split
 
 ---
 

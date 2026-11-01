@@ -2736,3 +2736,36 @@ def fit_ensemble(fit_fn, x, y, M=5, seed=0):
 
     return predict
 
+# Step 29 - uncertainty_split
+def uncertainty_split(w, mu, sigma):
+    w = np.asarray(w, dtype=np.float64)
+    mu = np.asarray(mu, dtype=np.float64)
+    sigma = np.asarray(sigma, dtype=np.float64)
+
+    if w.shape != mu.shape or w.shape != sigma.shape or w.ndim != 2:
+        raise ValueError("w, mu, and sigma must have the same (n, K) shape")
+
+    # Normalize mixture weights row-wise.
+    weight_sum = np.sum(w, axis=1, keepdims=True)
+    if np.any(weight_sum <= 0):
+        raise ValueError("Each row must have positive total mixture weight")
+
+    w = w / weight_sum
+
+    # Predictive mean.
+    mean = np.sum(w * mu, axis=1)
+
+    # Aleatoric uncertainty: expected within-component variance.
+    aleatoric = np.sum(w * sigma**2, axis=1)
+
+    # Epistemic uncertainty: variance of component means.
+    epistemic = np.sum(
+        w * (mu - mean[:, None])**2,
+        axis=1
+    )
+
+    # Protect against tiny negative values from floating-point rounding.
+    epistemic = np.maximum(epistemic, 0.0)
+
+    return mean, aleatoric, epistemic
+
