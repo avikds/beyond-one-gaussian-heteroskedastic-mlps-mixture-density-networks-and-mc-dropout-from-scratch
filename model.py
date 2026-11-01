@@ -260,3 +260,59 @@ def inverse_oracle_nll(x):
     # Calculate the mean negative log-likelihood.
     return float(np.mean(np.log(sizes)))
 
+# Step 4 - Standardizer
+class Standardizer:
+    """
+    Standardize numerical data using its mean and population standard deviation.
+
+    Supports arrays of arbitrary shape and provides methods to transform
+    values back to their original scale.
+    """
+
+    def __init__(self, v):
+        # Store the mean and population standard deviation as Python floats.
+        self.mean = float(np.mean(v))
+        self.std = float(np.std(v))
+
+    def forward(self, v):
+        """
+        Transform values into standardized units.
+
+        Formula:
+            z = (v - mean) / std
+        """
+        return (np.asarray(v) - self.mean) / self.std
+
+    def inverse(self, z):
+        """
+        Transform standardized values back to their original units.
+
+        Formula:
+            v = z * std + mean
+        """
+        return np.asarray(z) * self.std + self.mean
+
+    def scale_density(self, mu_z, sigma_z):
+        """
+        Convert Gaussian parameters from standardized units
+        back to the original units.
+
+        Parameters
+        ----------
+        mu_z : array-like
+            Gaussian mean in standardized units.
+        sigma_z : array-like
+            Gaussian standard deviation in standardized units.
+
+        Returns
+        -------
+        tuple
+            (mu, sigma) in the original units.
+        """
+
+        # Transform the mean and scale the standard deviation.
+        mu = self.inverse(mu_z)
+        sigma = np.asarray(sigma_z) * self.std
+
+        return mu, sigma
+

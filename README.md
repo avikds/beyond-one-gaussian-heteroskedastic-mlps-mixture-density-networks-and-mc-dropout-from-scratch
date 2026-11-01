@@ -13,6 +13,7 @@ python scaffold.py
 - [x] **1.** make_growing_noise_data
 - [x] **2.** make_inverse_data
 - [x] **3.** inverse_oracle_nll
+- [x] **4.** Standardizer
 
 ---
 
