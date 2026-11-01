@@ -829,3 +829,88 @@ def mixture_logpdf(y, w, mu, sigma):
 
     return log_density.astype(np.float64, copy=False)
 
+# Step 10 - pit_values
+from scipy.special import ndtr
+
+
+def pit_values(y, w, mu, sigma):
+    """
+    Calculate the Probability Integral Transform (PIT) values
+    for observations under Gaussian mixture distributions.
+
+    Parameters
+    ----------
+    y : np.ndarray
+        Observations of shape (n,).
+
+    w : np.ndarray
+        Mixture weights of shape (n, K).
+
+    mu : np.ndarray
+        Gaussian component means of shape (n, K).
+
+    sigma : np.ndarray
+        Gaussian component standard deviations of shape (n, K).
+
+    Returns
+    -------
+    np.ndarray
+        Predictive CDF values of shape (n,), with dtype float64.
+    """
+
+    # Convert inputs to float64 arrays.
+    y = np.asarray(y, dtype=np.float64)
+    w = np.asarray(w, dtype=np.float64)
+    mu = np.asarray(mu, dtype=np.float64)
+    sigma = np.asarray(sigma, dtype=np.float64)
+
+    # Calculate the standardized residual for every component.
+    z = (y[:, None] - mu) / sigma
+
+    # Evaluate the standard normal CDF for every component.
+    component_cdf = ndtr(z)
+
+    # Calculate the weighted sum of component CDFs.
+    pit = np.sum(w * component_cdf, axis=1)
+
+    return pit.astype(np.float64, copy=False)
+
+
+def pit_ks(p):
+    """
+    Calculate the Kolmogorov-Smirnov distance between
+    the empirical PIT distribution and Uniform(0, 1).
+
+    Parameters
+    ----------
+    p : np.ndarray
+        One-dimensional array of PIT values.
+
+    Returns
+    -------
+    float
+        Kolmogorov-Smirnov statistic as a Python float.
+    """
+
+    # Sort PIT values in ascending order.
+    p = np.sort(np.asarray(p, dtype=np.float64).ravel())
+
+    n = len(p)
+
+    # Handle an empty input safely.
+    if n == 0:
+        return 0.0
+
+    # Construct the empirical CDF upper and lower bounds.
+    i = np.arange(1, n + 1, dtype=np.float64)
+
+    upper = i / n
+    lower = (i - 1) / n
+
+    # Calculate the maximum distance in both directions.
+    d_plus = upper - p
+    d_minus = p - lower
+
+    # Return the largest KS deviation.
+    return float(max(np.max(d_plus), np.max(d_minus)))
+
