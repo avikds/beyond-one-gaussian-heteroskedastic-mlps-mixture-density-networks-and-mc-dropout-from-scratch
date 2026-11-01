@@ -554,92 +554,92 @@ class Adam:
     """
     Adam optimizer implemented from scratch using tinygrad tensors.
 
-    Supports in-place parameter updates and bias correction.
+    All update expressions are calculated before any in-place
+    assignments to avoid problematic dependencies in TinyJit.
     """
 
     def __init__(self, params, b1=0.9, b2=0.999, eps=1e-8):
-        """
-        Initialize the Adam optimizer.
 
-        Parameters
-        ----------
-        params : list
-            List of trainable tinygrad tensors.
-        b1 : float, default=0.9
-            Exponential decay rate for the first moment.
-        b2 : float, default=0.999
-            Exponential decay rate for the second moment.
-        eps : float, default=1e-8
-            Small constant for numerical stability.
-        """
-
-        # Store optimizer parameters.
         self.params = list(params)
         self.b1 = b1
         self.b2 = b2
         self.eps = eps
 
-        # Initialize first-moment buffers with zeros.
+        # Initialize first and second moment buffers.
         self.m = [
             Tensor.zeros(*p.shape).contiguous().realize()
             for p in self.params
         ]
 
-        # Initialize second-moment buffers with zeros.
         self.v = [
             Tensor.zeros(*p.shape).contiguous().realize()
             for p in self.params
         ]
 
-        # Initialize the optimization step counter.
+        # Optimization step counter.
         self.t = Tensor([0.0]).contiguous().realize()
 
     def step(self, grads, lr):
         """
         Perform one Adam optimization step.
 
-        Parameters
-        ----------
-        grads : list
-            Gradients corresponding to the trainable parameters.
-        lr : Tensor
-            One-element tensor containing the learning rate.
-
-        Returns
-        -------
-        list
+        Returns:
             [t, *params, *m, *v]
-
-            The caller is responsible for realizing the returned tensors.
         """
 
-        # Increment the optimization step counter.
-        t = self.t.assign(self.t + 1)
+        # Calculate the next step count without assigning yet.
+        t_new = self.t + 1.0
 
-        # Calculate bias-correction factors.
-        bc1 = 1 - self.b1 ** t
-        bc2 = 1 - self.b2 ** t
+        # Bias correction factors.
+        bc1 = 1.0 - self.b1 ** t_new
+        bc2 = 1.0 - self.b2 ** t_new
 
-        # Update each parameter and its moment estimates.
-        for p, g, m, v in zip(self.params, grads, self.m, self.v):
+        # Calculate every update before modifying any stored tensor.
+        new_m = []
+        new_v = []
+        new_params = []
 
-            # Update the first moment (mean of gradients).
-            m.assign(
-                self.b1 * m + (1 - self.b1) * g
+        for p, g, m, v in zip(
+            self.params, grads, self.m, self.v
+        ):
+
+            # First moment estimate.
+            m_new = self.b1 * m + (1.0 - self.b1) * g
+
+            # Second moment estimate.
+            v_new = self.b2 * v + (1.0 - self.b2) * (g * g)
+
+            # Bias-corrected parameter update.
+            p_new = p - lr[0] * (m_new / bc1) / (
+                (v_new / bc2).sqrt() + self.eps
             )
 
-            # Update the second moment (mean of squared gradients).
-            v.assign(
-                self.b2 * v + (1 - self.b2) * g * g
-            )
+            new_m.append(m_new)
+            new_v.append(v_new)
+            new_params.append(p_new)
 
-            # Apply the bias-corrected Adam parameter update.
-            p.assign(
-                p - lr[0] * (m / bc1) / ((v / bc2).sqrt() + self.eps)
-            )
+        # Only now perform the in-place assignments.
+        self.t.assign(t_new)
 
-        # Return updated tensors without realizing them.
-        return [self.t, *self.params, *self.m, *self.v]
+        for p, m, v, p_new, m_new, v_new in zip(
+            self.params,
+            self.m,
+            self.v,
+            new_params,
+            new_m,
+            new_v
+        ):
+            m.assign(m_new)
+            v.assign(v_new)
+            p.assign(p_new)
+
+        # Return all updated tensors for realization by the caller.
+        return [
+            self.t,
+            *self.params,
+            *self.m,
+            *self.v
+        ]
 
 # Step 8 - fit
 def fit(params, loss_fn, X, Y, steps=1000, lr=0.01,
