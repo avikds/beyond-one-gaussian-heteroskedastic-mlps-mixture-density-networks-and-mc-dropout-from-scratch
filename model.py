@@ -2246,41 +2246,84 @@ def fit_hme(x, y, steps=1500, lr=0.01, seed=0):
     return predict
 
 # Step 25 - fit_dropout
+# ── Step 025  fit_dropout ──
+
 def dropout_masks(rng, n, hidden, p):
+    """
+    Generate one independent Bernoulli dropout mask per hidden layer.
+
+    Each mask has shape (n, width) and dtype float32.
+    A unit is retained with probability 1 - p.
+    """
+
     if not 0.0 <= p < 1.0:
         raise ValueError("p must be in the range [0, 1)")
-    if n < 1:
-        raise ValueError("n must be positive")
 
-    # Generate one independent Bernoulli mask per hidden layer.
-    # A unit is retained with probability 1 - p.
-    masks = [
-        (rng.random((n, h)) >= p).astype(np.float32)
-        for h in hidden
+    if n < 0:
+        raise ValueError("n must be non-negative")
+
+    return [
+        (rng.random((n, width)) >= p).astype(np.float32)
+        for width in hidden
     ]
-
-    return masks
 
 
 def fit_dropout(x, y, p, hidden=(32, 32), steps=1000, lr=0.01, seed=0):
+    """
+    Train a two-headed heteroskedastic Gaussian MLP using
+    Bernoulli dropout on its hidden activations.
+
+    The network predicts:
+        output[:, 0] : conditional mean
+        output[:, 1] : raw conditional standard deviation
+
+    Training uses NumPy backpropagation and Adam to avoid
+    the tinygrad CFGContext gradient compilation failure.
+
+    Returns:
+        {
+            "net": trained DenseNet,
+            "sx": input Standardizer,
+            "sy": target Standardizer,
+            "p": dropout probability
+        }
+    """
+
+    # --------------------------------------------------
+    # Validate and prepare the data.
+    # --------------------------------------------------
+
     x = np.asarray(x, dtype=np.float64).reshape(-1)
     y = np.asarray(y, dtype=np.float64).reshape(-1)
 
     if x.shape != y.shape:
-        raise ValueError("x and y must have the same number of observations")
+        raise ValueError("x and y must have the same shape")
+
     if x.size == 0:
         raise ValueError("Training data cannot be empty")
+
     if not 0.0 <= p < 1.0:
         raise ValueError("p must be in the range [0, 1)")
 
+    if steps < 0:
+        raise ValueError("steps must be non-negative")
+
+    # --------------------------------------------------
     # Standardize inputs and targets.
+    # --------------------------------------------------
+
     sx = Standardizer(x)
     sy = Standardizer(y)
 
-    X = sx.forward(x)[:, None]
-    Y = sy.forward(y)
+    X = sx.forward(x)[:, None].astype(np.float64)
+    Y = sy.forward(y).astype(np.float64)
 
-    # Two-headed network: mean and raw standard deviation.
+    n = len(X)
+
+    # --------------------------------------------------
+    # Initialize the two-headed network.
+    # --------------------------------------------------
+
     net = DenseNet(
         d_in=1,
         hidden=hidden,
@@ -2289,7 +2332,7 @@ def fit_dropout(x, y, p, hidden=(32, 32), steps=1000, lr=0.01, seed=0):
     )
 
     # Initialize the mean bias to zero and the scale bias
-    # so that the initial standardized scale is approximately one.
+    # so that the initial standardized sigma is approximately 1.
     initial_bias = Tensor(
         [0.0, float(softplus_inv(1.0))],
         dtype=dtypes.float32,
@@ -2297,30 +2340,229 @@ def fit_dropout(x, y, p, hidden=(32, 32), steps=1000, lr=0.01, seed=0):
 
     net.layers[-1][1].assign(initial_bias).realize()
 
-    # Define the Gaussian NLL with dropout applied to hidden units.
-    def loss_fn(xb, yb, masks):
-        output = net(xb, masks=masks)
+    # Copy parameters into NumPy arrays for training.
+    weights = [
+        W.numpy().astype(np.float64)
+        for W, b in net.layers
+    ]
+
+    biases = [
+        b.numpy().astype(np.float64)
+        for W, b in net.layers
+    ]
+
+    # --------------------------------------------------
+    # Initialize Adam.
+    # --------------------------------------------------
+
+    beta1 = 0.9
+    beta2 = 0.999
+    eps = 1e-8
+
+    m_w = [np.zeros_like(W) for W in weights]
+    v_w = [np.zeros_like(W) for W in weights]
+
+    m_b = [np.zeros_like(b) for b in biases]
+    v_b = [np.zeros_like(b) for b in biases]
+
+    # Use the same dedicated training random stream as Step 8.
+    rng = np.random.default_rng([seed, 3])
+
+    # --------------------------------------------------
+    # Training loop.
+    # --------------------------------------------------
+
+    for t in range(1, steps + 1):
+
+        # Generate independent masks for every hidden layer.
+        if p > 0.0:
+            masks = dropout_masks(rng, n, hidden, p)
+        else:
+            masks = [
+                np.ones((n, width), dtype=np.float32)
+                for width in hidden
+            ]
+
+        # --------------------------------------------------
+        # Forward pass.
+        # --------------------------------------------------
+
+        activations = [X]
+        raw_hidden = []
+
+        for layer, (W, b) in enumerate(
+            zip(weights[:-1], biases[:-1])
+        ):
+
+            pre_activation = activations[-1] @ W + b
+
+            h = np.tanh(pre_activation)
+
+            raw_hidden.append(h)
+
+            # Apply dropout after the tanh activation.
+            h = h * masks[layer]
+
+            activations.append(h)
+
+        # Linear output layer.
+        output = activations[-1] @ weights[-1] + biases[-1]
 
         mu_z = output[:, 0]
-        sigma_z = softplus(output[:, 1]) + SIGMA_FLOOR
+        raw_sigma = output[:, 1]
 
-        return gaussian_nll(yb, mu_z, sigma_z)
+        # --------------------------------------------------
+        # Gaussian negative log-likelihood.
+        # --------------------------------------------------
 
-    # Generate a fresh set of per-example masks for every training step.
-    def mask_fn(rng, n):
-        return dropout_masks(rng, n, hidden, p)
+        sigma_z = (
+            np.logaddexp(0.0, raw_sigma) + SIGMA_FLOOR
+        )
 
-    # Train using the existing optimizer and training loop.
-    fit(
-        params=net.parameters(),
-        loss_fn=loss_fn,
-        X=X,
-        Y=Y,
-        steps=steps,
-        lr=lr,
-        mask_fn=mask_fn,
-        seed=seed,
-    )
+        residual = Y - mu_z
+
+        # Derivative of NLL with respect to the mean.
+        d_mu = (
+            (mu_z - Y) / (sigma_z ** 2 * n)
+        )
+
+        # Derivative of NLL with respect to sigma.
+        d_sigma = (
+            1.0 / sigma_z
+            - residual ** 2 / sigma_z ** 3
+        ) / n
+
+        # Derivative of Softplus.
+        sigmoid_raw = 1.0 / (
+            1.0 + np.exp(-np.clip(raw_sigma, -60.0, 60.0))
+        )
+
+        d_raw_sigma = d_sigma * sigmoid_raw
+
+        # Combine the two output-head gradients.
+        d_output = np.column_stack(
+            (d_mu, d_raw_sigma)
+        )
+
+        # --------------------------------------------------
+        # Backpropagation.
+        # --------------------------------------------------
+
+        grad_w = [None] * len(weights)
+        grad_b = [None] * len(biases)
+
+        # Output-layer gradients.
+        grad_w[-1] = activations[-1].T @ d_output
+        grad_b[-1] = np.sum(d_output, axis=0)
+
+        # Gradient entering the final hidden layer.
+        d_hidden = d_output @ weights[-1].T
+
+        # Backpropagate through hidden layers.
+        for layer in range(len(weights) - 2, -1, -1):
+
+            # The dropout mask multiplies the gradient too.
+            d_hidden = d_hidden * masks[layer]
+
+            # Derivative of tanh, using the unmasked activation.
+            h = raw_hidden[layer]
+
+            d_pre = d_hidden * (1.0 - h ** 2)
+
+            grad_w[layer] = (
+                activations[layer].T @ d_pre
+            )
+
+            grad_b[layer] = np.sum(
+                d_pre,
+                axis=0
+            )
+
+            if layer > 0:
+                d_hidden = d_pre @ weights[layer].T
+
+        # --------------------------------------------------
+        # Cosine learning-rate schedule.
+        # Matches Step 15.
+        # --------------------------------------------------
+
+        lr_t = lr * 0.5 * (
+            1.0 + math.cos(
+                math.pi * (t - 1) / max(steps, 1)
+            )
+        )
+
+        # --------------------------------------------------
+        # Adam parameter updates.
+        # --------------------------------------------------
+
+        for j in range(len(weights)):
+
+            # First and second moments for weights.
+            m_w[j] = (
+                beta1 * m_w[j]
+                + (1.0 - beta1) * grad_w[j]
+            )
+
+            v_w[j] = (
+                beta2 * v_w[j]
+                + (1.0 - beta2) * grad_w[j] ** 2
+            )
+
+            # First and second moments for biases.
+            m_b[j] = (
+                beta1 * m_b[j]
+                + (1.0 - beta1) * grad_b[j]
+            )
+
+            v_b[j] = (
+                beta2 * v_b[j]
+                + (1.0 - beta2) * grad_b[j] ** 2
+            )
+
+            # Bias correction.
+            correction1 = 1.0 - beta1 ** t
+            correction2 = 1.0 - beta2 ** t
+
+            m_w_hat = m_w[j] / correction1
+            v_w_hat = v_w[j] / correction2
+
+            m_b_hat = m_b[j] / correction1
+            v_b_hat = v_b[j] / correction2
+
+            # Update weights.
+            weights[j] -= (
+                lr_t * m_w_hat
+                / (np.sqrt(v_w_hat) + eps)
+            )
+
+            # Update biases.
+            biases[j] -= (
+                lr_t * m_b_hat
+                / (np.sqrt(v_b_hat) + eps)
+            )
+
+    # --------------------------------------------------
+    # Copy trained parameters back into DenseNet.
+    # --------------------------------------------------
+
+    for j, (W_tensor, b_tensor) in enumerate(net.layers):
+
+        W_tensor.assign(
+            Tensor(
+                weights[j].astype(np.float32)
+            ).contiguous()
+        ).realize()
+
+        b_tensor.assign(
+            Tensor(
+                biases[j].astype(np.float32)
+            ).contiguous()
+        ).realize()
+
+    # --------------------------------------------------
+    # Return the trained model and standardizers.
+    # --------------------------------------------------
 
     return {
         "net": net,
