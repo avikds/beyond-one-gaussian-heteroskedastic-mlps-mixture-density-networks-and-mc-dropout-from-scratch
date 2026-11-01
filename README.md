@@ -11,6 +11,7 @@ python scaffold.py
 ## Steps
 
 - [x] **1.** make_growing_noise_data
+- [x] **2.** make_inverse_data
 
 ---
 

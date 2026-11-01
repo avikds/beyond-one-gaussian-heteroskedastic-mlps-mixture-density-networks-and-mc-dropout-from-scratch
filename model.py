@@ -91,3 +91,62 @@ def make_growing_noise_data(n, seed=0, gap=None):
         sigma.astype(np.float64, copy=False)
     )
 
+# Step 2 - make_inverse_data
+def forward_curve(y):
+    """
+    Compute the forward curve used in the inverse problem.
+
+    Parameters
+    ----------
+    y : float or np.ndarray
+        Target values.
+
+    Returns
+    -------
+    float or np.ndarray
+        Forward curve values.
+    """
+    return y + 0.3 * np.sin(2.0 * np.pi * y)
+
+
+def make_inverse_data(n, seed=0):
+    """
+    Generate the one-to-many inverse regression dataset
+    from Figure 13.23a.
+
+    Parameters
+    ----------
+    n : int
+        Number of data points to generate.
+    seed : int, default=0
+        Random seed for reproducibility.
+
+    Returns
+    -------
+    x : np.ndarray
+        Input values generated from the forward curve and noise.
+    y : np.ndarray
+        Target values sampled uniformly from [0, 1].
+    """
+
+    if not isinstance(n, (int, np.integer)) or n < 0:
+        raise ValueError("n must be a non-negative integer")
+
+    # Use a dedicated random stream for this generator.
+    rng = np.random.default_rng([seed, 2])
+
+    # Step 1: Draw target values uniformly from [0, 1].
+    y = rng.uniform(0.0, 1.0, n)
+
+    # Step 2: Generate uniform noise in [-0.1, 0.1].
+    eta = rng.uniform(-0.1, 0.1, n)
+
+    # Step 3: Compute the input values using the forward curve.
+    x = forward_curve(y) + eta
+
+    # Return two float64 arrays.
+    return (
+        np.asarray(x, dtype=np.float64),
+        np.asarray(y, dtype=np.float64)
+    )
+
