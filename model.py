@@ -642,3 +642,124 @@ class Adam:
         # Return updated tensors without realizing them.
         return [self.t, *self.params, *self.m, *self.v]
 
+# Step 8 - fit
+from tinygrad import TinyJit, dtypes
+
+
+def fit(params, loss_fn, X, Y, steps=1000, lr=0.01,
+        mask_fn=None, seed=0):
+    """
+    Train a neural network using a TinyJit full-batch training loop.
+
+    Parameters
+    ----------
+    params : list
+        Trainable tinygrad tensors.
+    loss_fn : callable
+        Loss function with signature loss_fn(xb, yb, masks).
+        Must return a scalar tinygrad Tensor.
+    X : np.ndarray
+        Input training data.
+    Y : np.ndarray
+        Target training data.
+    steps : int, default=1000
+        Number of optimization steps.
+    lr : float, default=0.01
+        Initial learning rate.
+    mask_fn : callable or None, default=None
+        Optional function mask_fn(rng, n) that generates
+        fresh dropout masks for each training step.
+    seed : int, default=0
+        Random seed for dropout mask generation.
+
+    Returns
+    -------
+    list
+        Training history containing (step, loss) pairs.
+        Records are saved every 500 steps and at the final step.
+    """
+
+    # Initialize the Adam optimizer.
+    opt = Adam(params)
+
+    # Convert input and target arrays to realized float32 tensors.
+    # This conversion is performed only once.
+    xb = Tensor(
+        np.asarray(X, dtype=np.float32)
+    ).contiguous().realize()
+
+    yb = Tensor(
+        np.asarray(Y, dtype=np.float32)
+    ).contiguous().realize()
+
+    # Dedicated random stream for generating dropout masks.
+    rng = np.random.default_rng([seed, 3])
+
+    # Define the inner training step.
+    def step(xb, yb, lr_t, *masks):
+
+        # Pass None when dropout is disabled.
+        # Otherwise, pass the tuple of mask tensors.
+        current_masks = tuple(masks) if mask_fn is not None else None
+
+        # Compute the loss.
+        loss = loss_fn(xb, yb, current_masks)
+
+        # Calculate gradients with respect to all parameters.
+        grads = loss.gradient(*params)
+
+        # Update the model parameters using Adam.
+        updated_tensors = opt.step(grads, lr_t)
+
+        # Realize the loss, optimizer counter, parameters,
+        # first moments, and second moments.
+        Tensor.realize(loss, *updated_tensors)
+
+        # Return the realized loss.
+        return loss
+
+    # Compile the training step using TinyJit.
+    step = TinyJit(step)
+
+    # Store training loss history.
+    history = []
+
+    # Full-batch training loop.
+    for t in range(steps):
+
+        # Calculate the cosine learning-rate schedule.
+        lr_value = lr * 0.5 * (
+            1.0 + math.cos(math.pi * t / steps)
+        )
+
+        # Convert learning rate into a one-element float32 Tensor.
+        lr_t = Tensor(
+            [lr_value],
+            dtype=dtypes.float32
+        ).contiguous().realize()
+
+        # Generate fresh dropout masks for this training step.
+        if mask_fn is not None:
+
+            mask_arrays = mask_fn(rng, len(X))
+
+            # Convert each NumPy mask into a realized float32 Tensor.
+            mask_tensors = tuple(
+                Tensor(
+                    np.asarray(mask, dtype=np.float32)
+                ).contiguous().realize()
+                for mask in mask_arrays
+            )
+
+        else:
+            mask_tensors = ()
+
+        # Execute the TinyJit training step.
+        loss = step(xb, yb, lr_t, *mask_tensors)
+
+        # Record loss every 500 steps and at the final step.
+        if t % 500 == 0 or t == steps - 1:
+            history.append((int(t), float(loss.numpy())))
+
+    return history
+

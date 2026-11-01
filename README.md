@@ -17,6 +17,7 @@ python scaffold.py
 - [x] **5.** softplus
 - [x] **6.** DenseNet
 - [x] **7.** Adam
+- [x] **8.** fit
 
 ---
 
