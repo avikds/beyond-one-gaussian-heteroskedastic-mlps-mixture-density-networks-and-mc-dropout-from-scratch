@@ -26,6 +26,7 @@ python scaffold.py
 - [x] **14.** fit_fixed_sigma
 - [x] **15.** fit_two_head
 - [x] **16.** moe_e_step
+- [x] **17.** moe_m_step
 
 ---
 

@@ -1576,3 +1576,66 @@ def moe_e_step(Phi, y, V, W, sig2):
 
     return r, loglik
 
+# Step 17 - moe_m_step
+def moe_m_step(Phi, y, r, V, gate_steps=20, gate_lr=1.0):
+    Phi = np.asarray(Phi, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64).reshape(-1)
+    r = np.asarray(r, dtype=np.float64)
+    V = np.asarray(V, dtype=np.float64)
+
+    if Phi.ndim != 2:
+        raise ValueError("Phi must have shape (n, D)")
+
+    n, d = Phi.shape
+    if y.shape != (n,):
+        raise ValueError("y must have shape (n,)")
+    if r.ndim != 2 or r.shape[0] != n:
+        raise ValueError("r must have shape (n, K)")
+    if V.shape != (r.shape[1], d):
+        raise ValueError("V must have shape (K, D)")
+    if np.any(r < 0.0) or not np.all(np.isfinite(r)):
+        raise ValueError("responsibilities must be finite and nonnegative")
+
+    k_count = r.shape[1]
+    W_new = np.zeros((k_count, d), dtype=np.float64)
+    sig2 = np.empty(k_count, dtype=np.float64)
+    eye = np.eye(d, dtype=np.float64)
+
+    # Expert updates: responsibility-weighted least squares.
+    for k in range(k_count):
+        weights = r[:, k]
+        weighted_phi = Phi * weights[:, None]
+
+        lhs = Phi.T @ weighted_phi + 1e-8 * eye
+        rhs = Phi.T @ (weights * y)
+
+        W_new[k] = np.linalg.solve(lhs, rhs)
+
+        residual = y - Phi @ W_new[k]
+        weight_sum = np.sum(weights)
+
+        if weight_sum > 0.0:
+            sig2[k] = max(
+                np.sum(weights * residual**2) / weight_sum,
+                1e-6,
+            )
+        else:
+            # No effective responsibility: retain a finite variance.
+            sig2[k] = 1e-6
+
+    # Gate update: gradient descent on responsibility-weighted
+    # softmax cross-entropy.
+    V_new = V.copy()
+
+    for _ in range(int(gate_steps)):
+        logits = Phi @ V_new.T
+        logits -= np.max(logits, axis=1, keepdims=True)
+
+        exp_logits = np.exp(logits)
+        pi = exp_logits / np.sum(exp_logits, axis=1, keepdims=True)
+
+        gradient = (Phi.T @ (pi - r)).T / n
+        V_new -= gate_lr * gradient
+
+    return V_new, W_new, sig2
+
