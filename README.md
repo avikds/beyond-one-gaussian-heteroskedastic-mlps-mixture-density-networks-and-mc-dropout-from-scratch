@@ -31,6 +31,7 @@ python scaffold.py
 - [x] **19.** point_report
 - [x] **20.** mdn_nll
 - [x] **21.** mdn_grads
+- [x] **22.** fit_mdn
 
 ---
 

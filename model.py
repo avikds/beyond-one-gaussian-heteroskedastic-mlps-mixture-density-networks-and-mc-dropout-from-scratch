@@ -1792,28 +1792,39 @@ def point_report(x, y, w, mu):
 
 # Step 20 - mdn_nll
 def mdn_nll(y, logits, mu, sigma):
+    y_col = y.reshape(-1, 1)
+
+    # A one-component mixture is exactly a Gaussian.
+    # Avoid unnecessary softmax and log-sum-exp operations.
+    if logits.shape[1] == 1:
+        nll = (
+            sigma.log()
+            + 0.5 * math.log(2.0 * math.pi)
+            + 0.5 * ((y_col - mu) / sigma) ** 2
+        )
+        return nll.mean()
+
     # Log mixture weights.
     log_gate = logits.log_softmax(axis=1)
 
-    # Gaussian log-density for every observation and component.
+    # Gaussian log-density per component.
     log_gaussian = (
         -0.5 * math.log(2.0 * math.pi)
         - sigma.log()
-        - 0.5 * ((y.reshape(-1, 1) - mu) / sigma) ** 2
+        - 0.5 * ((y_col - mu) / sigma) ** 2
     )
 
-    # Joint log-probability of each component.
     log_joint = log_gate + log_gaussian
 
-    # Stable log-sum-exp. Detach the maximum so it does not
-    # contribute to the gradient.
+    # Numerically stable log-sum-exp with detached maximum.
     max_log = log_joint.max(axis=1, keepdim=True).detach()
     log_prob = (
         max_log
-        + (log_joint - max_log).exp().sum(axis=1, keepdim=True).log()
+        + (log_joint - max_log).exp()
+            .sum(axis=1, keepdim=True)
+            .log()
     )
 
-    # Mean negative log-likelihood across observations.
     return -log_prob.mean()
 
 # Step 21 - mdn_grads
@@ -1873,4 +1884,99 @@ def mdn_grads(y, logits, mu, sigma):
         "mu": grad_mu,
         "sigma": grad_sigma,
     }
+
+# Step 22 - fit_mdn
+def fit_mdn(x, y, K=3, hidden=(32, 32), steps=1000, lr=0.01, seed=0):
+    x = np.asarray(x, dtype=np.float64).reshape(-1)
+    y = np.asarray(y, dtype=np.float64).reshape(-1)
+
+    if x.shape != y.shape:
+        raise ValueError("x and y must have the same number of observations")
+    if x.size == 0:
+        raise ValueError("Training data cannot be empty")
+    if K < 1:
+        raise ValueError("K must be positive")
+
+    # Standardize inputs and targets.
+    sx = Standardizer(x)
+    sy = Standardizer(y)
+
+    X = sx.forward(x)[:, None]
+    Y = sy.forward(y)
+
+    # Shared backbone with K gate logits, K means, and K raw scales.
+    net = DenseNet(
+        d_in=1,
+        hidden=hidden,
+        d_out=3 * K,
+        seed=seed,
+    )
+
+    # Break component symmetry through distinct initial mean biases.
+    mean_bias = (
+        np.linspace(-1.2, 1.2, K)
+        if K > 1
+        else np.array([0.0])
+    )
+
+    initial_bias = np.concatenate([
+        np.zeros(K, dtype=np.float64),
+        mean_bias,
+        np.full(K, float(softplus_inv(0.5))),
+    ])
+
+    # Set and realize the output bias.
+    bias_tensor = Tensor(
+        initial_bias.astype(np.float32),
+        dtype=dtypes.float32,
+    ).contiguous().realize()
+
+    net.layers[-1][1].assign(bias_tensor).realize()
+
+    # Train the network using the mixture negative log-likelihood.
+    def loss_fn(xb, yb, masks):
+        o = net(xb)
+
+        logits = o[:, :K]
+        mu = o[:, K:2 * K]
+        sigma = softplus(o[:, 2 * K:]) + SIGMA_FLOOR
+
+        return mdn_nll(yb, logits, mu, sigma)
+
+    fit(
+        params=net.parameters(),
+        loss_fn=loss_fn,
+        X=X,
+        Y=Y,
+        steps=steps,
+        lr=lr,
+        mask_fn=None,
+        seed=seed,
+    )
+
+    def predict(xq):
+        xq = np.asarray(xq, dtype=np.float64).reshape(-1)
+
+        # Standardize query inputs and run the shared network.
+        Xq = sx.forward(xq)[:, None]
+        o = net.np_forward(Xq)
+
+        logits = o[:, :K]
+        mu_z = o[:, K:2 * K]
+        raw_sigma = o[:, 2 * K:]
+
+        # Convert logits to normalized mixture weights.
+        logits = logits - np.max(logits, axis=1, keepdims=True)
+        exp_logits = np.exp(logits)
+        w = exp_logits / np.sum(exp_logits, axis=1, keepdims=True)
+
+        # Convert raw scales to positive standard deviations.
+        sigma_z = np.logaddexp(0.0, raw_sigma) + SIGMA_FLOOR
+
+        # Convert Gaussian parameters to original target units.
+        mu, sigma = sy.scale_density(mu_z, sigma_z)
+
+        return w, mu, sigma
+
+    return predict
 
