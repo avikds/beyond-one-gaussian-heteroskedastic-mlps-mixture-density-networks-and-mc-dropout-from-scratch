@@ -550,3 +550,95 @@ class DenseNet:
         # Return predictions as a float64 NumPy array.
         return output.numpy().astype(np.float64)
 
+# Step 7 - Adam
+class Adam:
+    """
+    Adam optimizer implemented from scratch using tinygrad tensors.
+
+    Supports in-place parameter updates and bias correction.
+    """
+
+    def __init__(self, params, b1=0.9, b2=0.999, eps=1e-8):
+        """
+        Initialize the Adam optimizer.
+
+        Parameters
+        ----------
+        params : list
+            List of trainable tinygrad tensors.
+        b1 : float, default=0.9
+            Exponential decay rate for the first moment.
+        b2 : float, default=0.999
+            Exponential decay rate for the second moment.
+        eps : float, default=1e-8
+            Small constant for numerical stability.
+        """
+
+        # Store optimizer parameters.
+        self.params = list(params)
+        self.b1 = b1
+        self.b2 = b2
+        self.eps = eps
+
+        # Initialize first-moment buffers with zeros.
+        self.m = [
+            Tensor.zeros(*p.shape).contiguous().realize()
+            for p in self.params
+        ]
+
+        # Initialize second-moment buffers with zeros.
+        self.v = [
+            Tensor.zeros(*p.shape).contiguous().realize()
+            for p in self.params
+        ]
+
+        # Initialize the optimization step counter.
+        self.t = Tensor([0.0]).contiguous().realize()
+
+    def step(self, grads, lr):
+        """
+        Perform one Adam optimization step.
+
+        Parameters
+        ----------
+        grads : list
+            Gradients corresponding to the trainable parameters.
+        lr : Tensor
+            One-element tensor containing the learning rate.
+
+        Returns
+        -------
+        list
+            [t, *params, *m, *v]
+
+            The caller is responsible for realizing the returned tensors.
+        """
+
+        # Increment the optimization step counter.
+        t = self.t.assign(self.t + 1)
+
+        # Calculate bias-correction factors.
+        bc1 = 1 - self.b1 ** t
+        bc2 = 1 - self.b2 ** t
+
+        # Update each parameter and its moment estimates.
+        for p, g, m, v in zip(self.params, grads, self.m, self.v):
+
+            # Update the first moment (mean of gradients).
+            m.assign(
+                self.b1 * m + (1 - self.b1) * g
+            )
+
+            # Update the second moment (mean of squared gradients).
+            v.assign(
+                self.b2 * v + (1 - self.b2) * g * g
+            )
+
+            # Apply the bias-corrected Adam parameter update.
+            p.assign(
+                p - lr[0] * (m / bc1) / ((v / bc2).sqrt() + self.eps)
+            )
+
+        # Return updated tensors without realizing them.
+        return [self.t, *self.params, *self.m, *self.v]
+

@@ -16,6 +16,7 @@ python scaffold.py
 - [x] **4.** Standardizer
 - [x] **5.** softplus
 - [x] **6.** DenseNet
+- [x] **7.** Adam
 
 ---
 
