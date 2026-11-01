@@ -23,6 +23,7 @@ python scaffold.py
 - [x] **11.** interval_report
 - [x] **12.** coverage_by_region
 - [x] **13.** gaussian_nll
+- [x] **14.** fit_fixed_sigma
 
 ---
 

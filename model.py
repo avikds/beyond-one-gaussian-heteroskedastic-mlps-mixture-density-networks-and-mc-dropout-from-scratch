@@ -1213,3 +1213,114 @@ def gaussian_nll(y, mu, sigma):
     # Return the mean NLL across all observations.
     return nll.mean()
 
+# Step 14 - fit_fixed_sigma
+def fit_fixed_sigma(x, y, hidden=(32, 32), steps=1000, lr=0.01, seed=0):
+    """
+    Train a homoskedastic Gaussian MLP with a fixed noise standard deviation.
+
+    The network predicts the conditional mean, while a single global
+    standard deviation is estimated from the training residuals.
+
+    Parameters
+    ----------
+    x : np.ndarray
+        One-dimensional input array.
+    y : np.ndarray
+        One-dimensional target array.
+    hidden : tuple or list, default=(32, 32)
+        Hidden layer widths of the neural network.
+    steps : int, default=1000
+        Number of training steps.
+    lr : float, default=0.01
+        Initial learning rate.
+    seed : int, default=0
+        Random seed for network initialization and training.
+
+    Returns
+    -------
+    predict : callable
+        Prediction function accepting a one-dimensional input array.
+
+        Returns
+        -------
+        w : np.ndarray
+            Mixture weights of shape (n, 1), all equal to 1.
+        mu : np.ndarray
+            Predicted means in original target units, shape (n, 1).
+        sigma : np.ndarray
+            Constant predicted standard deviations in original
+            target units, shape (n, 1).
+    """
+
+    # Convert the input arrays to float64.
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+
+    # Step 1: Standardize the inputs and targets.
+    sx = Standardizer(x)
+    sy = Standardizer(y)
+
+    X = sx.forward(x)[:, None]
+    Y = sy.forward(y)
+
+    # Step 2: Initialize and train the neural network.
+    net = DenseNet(1, hidden, 1, seed=seed)
+
+    # Train the network by minimizing the mean squared error.
+    fit(
+        net.parameters(),
+        lambda xb, yb, masks: (
+            (net(xb)[:, 0] - yb) ** 2
+        ).mean(),
+        X,
+        Y,
+        steps=steps,
+        lr=lr,
+        seed=seed
+    )
+
+    # Step 3: Estimate the global noise standard deviation
+    # using the residuals on the training data.
+    train_predictions = net.np_forward(X)[:, 0]
+
+    residuals = train_predictions - Y
+
+    sigma_z = float(np.sqrt(np.mean(residuals ** 2)))
+
+    # Step 4: Define the prediction function.
+    def predict(xq):
+        """
+        Generate Gaussian predictions for new inputs.
+
+        Parameters
+        ----------
+        xq : np.ndarray
+            One-dimensional array of query inputs.
+
+        Returns
+        -------
+        tuple
+            (w, mu, sigma), each having shape (n, 1).
+        """
+
+        xq = np.asarray(xq, dtype=np.float64).reshape(-1)
+
+        # Standardize the query inputs.
+        Xq = sx.forward(xq)[:, None]
+
+        # Predict the conditional mean in standardized units.
+        mu_z = net.np_forward(Xq)
+
+        # Convert mean and standard deviation to original units.
+        mu, sigma = sy.scale_density(
+            mu_z,
+            np.full_like(mu_z, sigma_z, dtype=np.float64)
+        )
+
+        # A single Gaussian component has weight 1 for every input.
+        w = np.ones_like(mu, dtype=np.float64)
+
+        return w, mu, sigma
+
+    return predict
+
