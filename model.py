@@ -661,13 +661,10 @@ class Adam:
 def fit(params, loss_fn, X, Y, steps=1000, lr=0.01,
         mask_fn=None, seed=0):
 
-    # Keep a stable list of trainable parameters.
     params = list(params)
-
-    # Initialize the Adam optimizer.
     opt = Adam(params)
 
-    # Convert training data to realized float32 tensors.
+    # Prepare training tensors.
     xb = Tensor(
         np.asarray(X, dtype=np.float32)
     ).contiguous().realize()
@@ -676,9 +673,7 @@ def fit(params, loss_fn, X, Y, steps=1000, lr=0.01,
         np.asarray(Y, dtype=np.float32)
     ).contiguous().realize()
 
-    # Dedicated random generator for dropout masks.
     rng = np.random.default_rng([seed, 3])
-
     history = []
 
     for t in range(steps):
@@ -693,42 +688,38 @@ def fit(params, loss_fn, X, Y, steps=1000, lr=0.01,
             dtype=dtypes.float32
         ).contiguous().realize()
 
-        # Generate fresh dropout masks when requested.
+        # Generate fresh dropout masks if required.
         if mask_fn is not None:
-
             mask_arrays = mask_fn(rng, len(X))
 
-            mask_tensors = tuple(
+            masks = tuple(
                 Tensor(
                     np.asarray(mask, dtype=np.float32)
                 ).contiguous().realize()
                 for mask in mask_arrays
             )
-
         else:
-            mask_tensors = ()
+            masks = None
 
-        # Calculate the loss eagerly (without TinyJit).
-        current_masks = (
-            mask_tensors if mask_fn is not None else None
-        )
+        # Forward pass and loss.
+        loss = loss_fn(xb, yb, masks)
 
-        loss = loss_fn(xb, yb, current_masks)
-
-        # Calculate gradients for all trainable parameters.
+        # Calculate all parameter gradients.
         grads = loss.gradient(*params)
 
-        # Realize the gradients together so shared graph
-        # dependencies are scheduled in one operation.
-        Tensor.realize(*grads)
+        # IMPORTANT:
+        # Realize each gradient independently rather than
+        # compiling all gradient outputs in one schedule.
+        for grad in grads:
+            grad.realize()
 
-        # Realize the loss separately.
+        # Realize the scalar loss separately.
         loss.realize()
 
-        # Update parameters outside any JIT context.
+        # Update parameters using Adam.
         opt.step(grads, lr_t)
 
-        # Record training loss periodically.
+        # Store periodic loss values.
         if t % 500 == 0 or t == steps - 1:
             history.append(
                 (int(t), float(loss.numpy()))
