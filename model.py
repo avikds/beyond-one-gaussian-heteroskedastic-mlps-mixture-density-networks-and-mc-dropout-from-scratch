@@ -1639,3 +1639,108 @@ def moe_m_step(Phi, y, r, V, gate_steps=20, gate_lr=1.0):
 
     return V_new, W_new, sig2
 
+# Step 18 - fit_mole
+def fit_mole(x, y, K=3, n_iter=200, restarts=8, seed=0, gate_steps=20, gate_lr=1.0):
+    x = np.asarray(x, dtype=np.float64).reshape(-1)
+    y = np.asarray(y, dtype=np.float64).reshape(-1)
+
+    if x.shape != y.shape:
+        raise ValueError("x and y must have the same number of observations")
+    if x.size == 0:
+        raise ValueError("x and y must not be empty")
+    if K < 1 or n_iter < 1 or restarts < 1:
+        raise ValueError("K, n_iter, and restarts must be positive")
+
+    # Standardize inputs and targets.
+    sx = Standardizer(x)
+    sy = Standardizer(y)
+
+    xz = sx.forward(x)
+    yz = sy.forward(y)
+
+    n = x.size
+    Phi = np.column_stack([np.ones(n), xz])
+
+    best_V = None
+    best_W = None
+    best_sig2 = None
+    best_trace = None
+    best_loglik = -np.inf
+    restart_logliks = []
+
+    for i in range(restarts):
+        rng = np.random.default_rng(seed + i)
+
+        # Initialize in the specified order.
+        W = rng.normal(0.0, 1.0, size=(K, 2))
+        V = rng.normal(0.0, 0.1, size=(K, 2))
+        sig2 = np.ones(K, dtype=np.float64)
+
+        trace = []
+
+        for _ in range(n_iter):
+            r, loglik = moe_e_step(Phi, yz, V, W, sig2)
+            trace.append(float(loglik))
+
+            V, W, sig2 = moe_m_step(
+                Phi,
+                yz,
+                r,
+                V,
+                gate_steps=gate_steps,
+                gate_lr=gate_lr,
+            )
+
+        # Evaluate likelihood after the final M-step.
+        _, final_loglik = moe_e_step(Phi, yz, V, W, sig2)
+        final_loglik = float(final_loglik)
+
+        # Make the last trace entry correspond to the final parameters.
+        trace[-1] = final_loglik
+        restart_logliks.append(final_loglik)
+
+        # Keep the earliest restart in case of a tie.
+        if final_loglik > best_loglik:
+            best_loglik = final_loglik
+            best_V = V.copy()
+            best_W = W.copy()
+            best_sig2 = sig2.copy()
+            best_trace = trace.copy()
+
+    def predict(x_new):
+        x_new = np.asarray(x_new, dtype=np.float64).reshape(-1)
+
+        x_new_z = sx.forward(x_new)
+        Phi_new = np.column_stack([
+            np.ones(x_new.size),
+            x_new_z,
+        ])
+
+        # Softmax gate probabilities.
+        logits = Phi_new @ best_V.T
+        logits -= np.max(logits, axis=1, keepdims=True)
+
+        exp_logits = np.exp(logits)
+        w = exp_logits / np.sum(exp_logits, axis=1, keepdims=True)
+
+        # Expert means and standard deviations in standardized units.
+        mu_z = Phi_new @ best_W.T
+        sigma_z = np.broadcast_to(
+            np.sqrt(best_sig2)[None, :],
+            mu_z.shape,
+        )
+
+        # Convert both Gaussian parameters to original y units.
+        mu, sigma = sy.scale_density(mu_z, sigma_z)
+
+        return w, mu, sigma
+
+    return {
+        "V": best_V,
+        "W": best_W,
+        "sig2": best_sig2,
+        "trace": best_trace,
+        "restart_logliks": restart_logliks,
+        "predict": predict,
+    }
+
