@@ -550,7 +550,6 @@ class DenseNet:
         return output.numpy().astype(np.float64)
 
 # Step 7 - Adam
-# ── Step 007  Adam ──
 class Adam:
     """
     Adam optimizer implemented from scratch using tinygrad tensors.
