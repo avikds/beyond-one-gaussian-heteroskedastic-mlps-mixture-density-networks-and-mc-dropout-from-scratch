@@ -377,3 +377,176 @@ def softplus_inv(s):
 
     return s + np.log(-np.expm1(-s))
 
+# Step 6 - DenseNet
+import math
+
+
+class DenseNet:
+    """
+    A fully connected tanh neural network with optional dropout masks.
+
+    Hidden layers use tanh activations.
+    The output layer uses a linear activation.
+    """
+
+    def __init__(self, d_in, hidden, d_out, seed=0):
+        """
+        Initialize the neural network.
+
+        Parameters
+        ----------
+        d_in : int
+            Number of input features.
+        hidden : list or tuple
+            Widths of the hidden layers.
+        d_out : int
+            Number of output units.
+        seed : int, default=0
+            Random seed for reproducible initialization.
+        """
+
+        # Store hidden layer widths as a list.
+        self.hidden = list(hidden)
+
+        # Dedicated random generator for network initialization.
+        rng = np.random.default_rng(seed)
+
+        # Define the dimensions of all layers.
+        dimensions = [d_in] + self.hidden + [d_out]
+
+        # Store network parameters as (W, b) tuples.
+        self.layers = []
+
+        # Initialize each layer in order.
+        for i in range(len(dimensions) - 1):
+
+            a = dimensions[i]
+            b = dimensions[i + 1]
+
+            # Use different initialization scales for hidden
+            # and output layers.
+            if i < len(self.hidden):
+                std = math.sqrt(1.0 / a)
+            else:
+                std = math.sqrt(0.1 / a)
+
+            # Initialize weights using a normal distribution.
+            W_array = rng.normal(
+                loc=0.0,
+                scale=std,
+                size=(a, b)
+            ).astype(np.float32)
+
+            # Initialize biases to zero without random draws.
+            b_array = np.zeros(b, dtype=np.float32)
+
+            # Convert parameters into realized contiguous tensors.
+            W = Tensor(W_array).contiguous().realize()
+            bias = Tensor(b_array).contiguous().realize()
+
+            # Store the weight and bias tensors.
+            self.layers.append((W, bias))
+
+    def parameters(self):
+        """
+        Return all trainable parameters in layer order.
+
+        Returns
+        -------
+        list
+            [W0, b0, W1, b1, ...]
+        """
+
+        return [
+            parameter
+            for W, b in self.layers
+            for parameter in (W, b)
+        ]
+
+    def __call__(self, x, masks=None, scale=1.0):
+        """
+        Perform a forward pass through the network.
+
+        Parameters
+        ----------
+        x : Tensor
+            Input tinygrad tensor.
+        masks : list or None, default=None
+            Optional dropout masks for hidden layers.
+            Each mask has shape (n, hidden_width).
+        scale : float, default=1.0
+            Scaling factor applied to hidden activations
+            when dropout masks are not supplied.
+
+        Returns
+        -------
+        Tensor
+            Network predictions.
+        """
+
+        h = x
+
+        # Process all hidden layers.
+        for i, (W, b) in enumerate(self.layers[:-1]):
+
+            # Linear transformation followed by tanh activation.
+            h = (h @ W + b).tanh()
+
+            # Apply per-example dropout masks when provided.
+            if masks is not None:
+                h = h * masks[i]
+
+            # Otherwise, apply the specified scaling factor.
+            elif scale != 1.0:
+                h = h * scale
+
+        # The final output layer is linear (no activation).
+        W_out, b_out = self.layers[-1]
+
+        return h @ W_out + b_out
+
+    def np_forward(self, X, masks=None, scale=1.0):
+        """
+        Perform a forward pass using NumPy input arrays.
+
+        Parameters
+        ----------
+        X : np.ndarray
+            Two-dimensional input array.
+        masks : list or None, default=None
+            Optional list of NumPy dropout masks.
+        scale : float, default=1.0
+            Scaling factor for hidden activations.
+
+        Returns
+        -------
+        np.ndarray
+            Network predictions as a float64 NumPy array.
+        """
+
+        # Convert input data to a contiguous float32 Tensor.
+        X_tensor = Tensor(
+            np.asarray(X, dtype=np.float32)
+        ).contiguous().realize()
+
+        # Convert each NumPy dropout mask into a tinygrad Tensor.
+        if masks is not None:
+            masks_tensor = [
+                Tensor(
+                    np.asarray(mask, dtype=np.float32)
+                ).contiguous().realize()
+                for mask in masks
+            ]
+        else:
+            masks_tensor = None
+
+        # Execute the network's forward pass.
+        output = self(
+            X_tensor,
+            masks=masks_tensor,
+            scale=scale
+        )
+
+        # Return predictions as a float64 NumPy array.
+        return output.numpy().astype(np.float64)
+

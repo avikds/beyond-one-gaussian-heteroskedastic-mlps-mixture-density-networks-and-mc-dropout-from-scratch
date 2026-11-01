@@ -15,6 +15,7 @@ python scaffold.py
 - [x] **3.** inverse_oracle_nll
 - [x] **4.** Standardizer
 - [x] **5.** softplus
+- [x] **6.** DenseNet
 
 ---
 
