@@ -550,22 +550,20 @@ class DenseNet:
         return output.numpy().astype(np.float64)
 
 # Step 7 - Adam
+# ── Step 007  Adam ──
 class Adam:
     """
     Adam optimizer implemented from scratch using tinygrad tensors.
-
-    All update expressions are calculated before any in-place
-    assignments to avoid problematic dependencies in TinyJit.
     """
 
     def __init__(self, params, b1=0.9, b2=0.999, eps=1e-8):
-
+        # Store trainable parameters and optimizer settings.
         self.params = list(params)
         self.b1 = b1
         self.b2 = b2
         self.eps = eps
 
-        # Initialize first and second moment buffers.
+        # Initialize first and second moment estimates.
         self.m = [
             Tensor.zeros(*p.shape).contiguous().realize()
             for p in self.params
@@ -576,64 +574,83 @@ class Adam:
             for p in self.params
         ]
 
-        # Optimization step counter.
+        # Initialize optimization counter.
         self.t = Tensor([0.0]).contiguous().realize()
 
     def step(self, grads, lr):
         """
         Perform one Adam optimization step.
 
-        Returns:
+        Parameters
+        ----------
+        grads : Tensor or list of Tensor
+            Gradients corresponding to parameters.
+        lr : Tensor
+            Learning rate supplied on every call.
+
+        Returns
+        -------
+        list
             [t, *params, *m, *v]
         """
 
-        # Calculate the next step count without assigning yet.
-        t_new = self.t + 1.0
+        # Support both a single gradient and a list of gradients.
+        if isinstance(grads, Tensor):
+            grads = [grads]
+        else:
+            grads = list(grads)
 
-        # Bias correction factors.
-        bc1 = 1.0 - self.b1 ** t_new
-        bc2 = 1.0 - self.b2 ** t_new
-
-        # Calculate every update before modifying any stored tensor.
-        new_m = []
-        new_v = []
-        new_params = []
-
-        for p, g, m, v in zip(
-            self.params, grads, self.m, self.v
-        ):
-
-            # First moment estimate.
-            m_new = self.b1 * m + (1.0 - self.b1) * g
-
-            # Second moment estimate.
-            v_new = self.b2 * v + (1.0 - self.b2) * (g * g)
-
-            # Bias-corrected parameter update.
-            p_new = p - lr[0] * (m_new / bc1) / (
-                (v_new / bc2).sqrt() + self.eps
+        if len(grads) != len(self.params):
+            raise ValueError(
+                "Number of gradients must match number of parameters"
             )
 
-            new_m.append(m_new)
-            new_v.append(v_new)
-            new_params.append(p_new)
+        # Convert a numeric learning rate to a Tensor if necessary.
+        if not isinstance(lr, Tensor):
+            lr = Tensor([float(lr)]).contiguous().realize()
 
-        # Only now perform the in-place assignments.
-        self.t.assign(t_new)
+        # Increment the step counter.
+        self.t.assign(self.t + 1.0).realize()
 
-        for p, m, v, p_new, m_new, v_new in zip(
+        # Calculate bias-correction factors.
+        bc1 = 1.0 - self.b1 ** self.t
+        bc2 = 1.0 - self.b2 ** self.t
+
+        # Update each parameter and its moment estimates.
+        for p, g, m, v in zip(
             self.params,
+            grads,
             self.m,
-            self.v,
-            new_params,
-            new_m,
-            new_v
+            self.v
         ):
-            m.assign(m_new)
-            v.assign(v_new)
-            p.assign(p_new)
 
-        # Return all updated tensors for realization by the caller.
+            # Realize the gradient before modifying the parameter.
+            g.realize()
+
+            # Update first moment.
+            m.assign(
+                self.b1 * m + (1.0 - self.b1) * g
+            ).realize()
+
+            # Update second moment.
+            v.assign(
+                self.b2 * v + (1.0 - self.b2) * (g * g)
+            ).realize()
+
+            # Bias-corrected moment estimates.
+            m_hat = m / bc1
+            v_hat = v / bc2
+
+            # Calculate the Adam update.
+            update = m_hat / (v_hat.sqrt() + self.eps)
+
+            # Detach the parameter before its in-place update.
+            # Use the learning rate supplied to this call.
+            p.assign(
+                p.detach() - lr * update
+            ).realize()
+
+        # Return counter, parameters, and both moment estimates.
         return [
             self.t,
             *self.params,
@@ -1288,71 +1305,190 @@ def fit_fixed_sigma(x, y, hidden=(32, 32), steps=1000, lr=0.01, seed=0):
 
 # Step 15 - fit_two_head
 def gaussian_head_params(o, sy):
+    """
+    Convert the two-headed neural network outputs into Gaussian
+    mixture parameters in the original target units.
+
+    Parameters
+    ----------
+    o : np.ndarray
+        Network output of shape (n, 2).
+        Column 0: predicted mean.
+        Column 1: raw predicted standard deviation.
+    sy : Standardizer
+        Target standardizer.
+
+    Returns
+    -------
+    tuple
+        w, mu, sigma, each of shape (n, 1).
+    """
+
+    # Convert network outputs to float64.
     o = np.asarray(o, dtype=np.float64)
 
+    # Extract the predicted mean in standardized units.
     mu_z = o[:, 0:1]
 
-    # Stable NumPy Softplus plus the minimum scale.
+    # Apply numerically stable NumPy Softplus.
+    # Add the minimum permitted standard deviation.
     sigma_z = np.logaddexp(0.0, o[:, 1:2]) + SIGMA_FLOOR
 
+    # Convert mean and standard deviation to original units.
     mu, sigma = sy.scale_density(mu_z, sigma_z)
 
+    # One Gaussian component per input.
     w = np.ones_like(mu, dtype=np.float64)
 
     return w, mu, sigma
 
 
 def fit_two_head(x, y, hidden=(32, 32), steps=1000, lr=0.01, seed=0):
+    """
+    Train a heteroskedastic Gaussian MLP with two output heads.
 
-    x = np.asarray(x, dtype=np.float64)
-    y = np.asarray(y, dtype=np.float64)
+    The first output predicts the conditional mean.
+    The second output predicts the input-dependent noise scale.
 
-    # Standardize inputs and targets.
+    Parameters
+    ----------
+    x : np.ndarray
+        Training input values.
+    y : np.ndarray
+        Training target values.
+    hidden : tuple or list, default=(32, 32)
+        Hidden layer widths.
+    steps : int, default=1000
+        Number of training steps.
+    lr : float, default=0.01
+        Initial learning rate.
+    seed : int, default=0
+        Random seed.
+
+    Returns
+    -------
+    predict : callable
+        Prediction function accepting xq.
+
+        Returns:
+            w    : (n, 1)
+            mu   : (n, 1)
+            sigma: (n, 1)
+
+        All predictions are in original target units.
+    """
+
+    # Convert training data to float64 arrays.
+    x = np.asarray(x, dtype=np.float64).reshape(-1)
+    y = np.asarray(y, dtype=np.float64).reshape(-1)
+
+    if x.size != y.size:
+        raise ValueError("x and y must contain the same number of observations")
+
+    if x.size == 0:
+        raise ValueError("Training data cannot be empty")
+
+    # --------------------------------------------------
+    # Step 1: Standardize inputs and targets.
+    # --------------------------------------------------
+
     sx = Standardizer(x)
     sy = Standardizer(y)
 
     X = sx.forward(x)[:, None]
     Y = sy.forward(y)
 
-    # Shared backbone with two output heads.
-    net = DenseNet(1, hidden, 2, seed=seed)
+    # --------------------------------------------------
+    # Step 2: Initialize the two-headed neural network.
+    # --------------------------------------------------
 
-    # Initialize mean = 0 and sigma = 1.
+    net = DenseNet(
+        d_in=1,
+        hidden=hidden,
+        d_out=2,
+        seed=seed
+    )
+
+    # Initialize the output biases.
+    # Mean bias = 0.
+    # Raw sigma bias = inverse Softplus of 1.
+    # Therefore, the initial predicted sigma is approximately 1
+    # in standardized target units.
     initial_bias = Tensor(
         [0.0, float(softplus_inv(1.0))],
         dtype=dtypes.float32
     ).contiguous().realize()
 
+    # Assign the initial output bias.
     net.layers[-1][1].assign(initial_bias).realize()
 
-    # Gaussian negative log-likelihood.
+    # --------------------------------------------------
+    # Step 3: Define Gaussian negative log-likelihood.
+    # --------------------------------------------------
+
     def loss_fn(xb, yb, masks):
+
+        # Forward pass through the network.
         o = net(xb)
 
+        # First head: conditional mean.
         mu_z = o[:, 0]
+
+        # Second head: positive conditional standard deviation.
         sigma_z = softplus(o[:, 1]) + SIGMA_FLOOR
 
-        return gaussian_nll(yb, mu_z, sigma_z)
+        # Gaussian negative log-likelihood.
+        return gaussian_nll(
+            yb,
+            mu_z,
+            sigma_z
+        )
 
-    # Train using the corrected training loop.
+    # --------------------------------------------------
+    # Step 4: Train using the shared training toolkit.
+    # --------------------------------------------------
+
     fit(
-        net.parameters(),
-        loss_fn,
-        X,
-        Y,
+        params=net.parameters(),
+        loss_fn=loss_fn,
+        X=X,
+        Y=Y,
         steps=steps,
         lr=lr,
+        mask_fn=None,
         seed=seed
     )
 
-    # Prediction function.
+    # --------------------------------------------------
+    # Step 5: Define prediction function.
+    # --------------------------------------------------
+
     def predict(xq):
+        """
+        Generate heteroskedastic Gaussian predictions.
+
+        Parameters
+        ----------
+        xq : np.ndarray
+            Query input values.
+
+        Returns
+        -------
+        tuple
+            w, mu, sigma, each of shape (n, 1),
+            in original target units.
+        """
+
+        # Convert query inputs to float64.
         xq = np.asarray(xq, dtype=np.float64).reshape(-1)
 
+        # Standardize query inputs.
         Xq = sx.forward(xq)[:, None]
 
+        # Obtain the network's two outputs.
         o = net.np_forward(Xq)
 
+        # Convert outputs into original-unit Gaussian parameters.
         return gaussian_head_params(o, sy)
 
     return predict
