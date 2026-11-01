@@ -1816,3 +1816,61 @@ def mdn_nll(y, logits, mu, sigma):
     # Mean negative log-likelihood across observations.
     return -log_prob.mean()
 
+# Step 21 - mdn_grads
+def mdn_grads(y, logits, mu, sigma):
+    y = np.asarray(y, dtype=np.float64).reshape(-1)
+    logits = np.asarray(logits, dtype=np.float64)
+    mu = np.asarray(mu, dtype=np.float64)
+    sigma = np.asarray(sigma, dtype=np.float64)
+
+    if logits.ndim != 2:
+        raise ValueError("logits must have shape (n, K)")
+    if mu.shape != logits.shape or sigma.shape != logits.shape:
+        raise ValueError("logits, mu, and sigma must have identical shapes")
+    if y.shape != (logits.shape[0],):
+        raise ValueError("y must have shape (n,)")
+    if np.any(sigma <= 0.0) or not np.all(np.isfinite(sigma)):
+        raise ValueError("sigma must be finite and strictly positive")
+
+    n = y.size
+
+    # Stable log-softmax for the gating network.
+    shifted_logits = logits - np.max(logits, axis=1, keepdims=True)
+    log_gate = shifted_logits - np.log(
+        np.sum(np.exp(shifted_logits), axis=1, keepdims=True)
+    )
+
+    # Gaussian log-density for every observation and component.
+    residual = y[:, None] - mu
+    log_gaussian = -0.5 * np.log(2.0 * np.pi) - np.log(sigma) \
+                   - 0.5 * (residual / sigma) ** 2
+
+    # Posterior component responsibilities, computed in log space.
+    log_joint = log_gate + log_gaussian
+    log_joint_max = np.max(log_joint, axis=1, keepdims=True)
+    log_norm = log_joint_max + np.log(
+        np.sum(np.exp(log_joint - log_joint_max), axis=1, keepdims=True)
+    )
+    resp = np.exp(log_joint - log_norm)
+
+    # Closed-form gradients of the mean mixture NLL.
+    grad_logits = (np.exp(log_gate) - resp) / n
+
+    grad_mu = (
+        resp * (mu - y[:, None]) / (sigma ** 2)
+    ) / n
+
+    grad_sigma = (
+        resp * (
+            1.0 / sigma
+            - residual**2 / (sigma ** 3)
+        )
+    ) / n
+
+    return {
+        "resp": resp,
+        "logits": grad_logits,
+        "mu": grad_mu,
+        "sigma": grad_sigma,
+    }
+
