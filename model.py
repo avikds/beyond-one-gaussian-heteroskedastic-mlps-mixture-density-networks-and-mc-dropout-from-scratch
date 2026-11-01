@@ -914,3 +914,130 @@ def pit_ks(p):
     # Return the largest KS deviation.
     return float(max(np.max(d_plus), np.max(d_minus)))
 
+# Step 11 - interval_report
+def mixture_quantile(q, w, mu, sigma, iters=60):
+    """
+    Calculate per-input quantiles of Gaussian mixture distributions
+    using vectorized bisection on the mixture CDF.
+
+    Parameters
+    ----------
+    q : float
+        Desired quantile, strictly between 0 and 1.
+    w : np.ndarray
+        Mixture weights of shape (n, K).
+    mu : np.ndarray
+        Gaussian component means of shape (n, K).
+    sigma : np.ndarray
+        Gaussian component standard deviations of shape (n, K).
+    iters : int, default=60
+        Number of bisection iterations.
+
+    Returns
+    -------
+    np.ndarray
+        Quantile values of shape (n,), with dtype float64.
+    """
+
+    # Convert inputs to float64 for numerical precision.
+    w = np.asarray(w, dtype=np.float64)
+    mu = np.asarray(mu, dtype=np.float64)
+    sigma = np.asarray(sigma, dtype=np.float64)
+
+    q = float(q)
+
+    if not 0.0 < q < 1.0:
+        raise ValueError("q must be strictly between 0 and 1")
+
+    # Establish initial lower and upper brackets for each input.
+    lo = np.min(mu - 10.0 * sigma, axis=1)
+    hi = np.max(mu + 10.0 * sigma, axis=1)
+
+    # Perform vectorized bisection.
+    for _ in range(iters):
+
+        # Calculate the midpoint of each interval.
+        mid = 0.5 * (lo + hi)
+
+        # Evaluate the Gaussian mixture CDF at each midpoint.
+        z = (mid[:, None] - mu) / sigma
+
+        cdf = np.sum(w * ndtr(z), axis=1)
+
+        # Update the brackets according to the CDF.
+        below = cdf < q
+
+        lo = np.where(below, mid, lo)
+        hi = np.where(below, hi, mid)
+
+    # Return the final midpoint estimates.
+    return (0.5 * (lo + hi)).astype(np.float64, copy=False)
+
+
+def interval_report(y, w, mu, sigma, levels=(0.5, 0.8, 0.9, 0.95)):
+    """
+    Measure the empirical coverage and average width of central
+    predictive intervals for Gaussian mixture distributions.
+
+    Parameters
+    ----------
+    y : np.ndarray
+        Observed target values of shape (n,).
+    w : np.ndarray
+        Mixture weights of shape (n, K).
+    mu : np.ndarray
+        Gaussian component means of shape (n, K).
+    sigma : np.ndarray
+        Gaussian component standard deviations of shape (n, K).
+    levels : tuple, default=(0.5, 0.8, 0.9, 0.95)
+        Desired central prediction interval levels.
+
+    Returns
+    -------
+    list
+        A list of dictionaries containing:
+        - level: requested interval level.
+        - coverage: fraction of observations inside the interval.
+        - width: average interval width.
+    """
+
+    # Convert observations to a float64 NumPy array.
+    y = np.asarray(y, dtype=np.float64).reshape(-1)
+
+    reports = []
+
+    # Calculate each requested central prediction interval.
+    for L in levels:
+
+        L = float(L)
+
+        if not 0.0 < L < 1.0:
+            raise ValueError("Each interval level must be between 0 and 1")
+
+        # Determine the lower and upper quantile probabilities.
+        q_lo = (1.0 - L) / 2.0
+        q_hi = (1.0 + L) / 2.0
+
+        # Calculate the lower and upper interval boundaries.
+        lower = mixture_quantile(q_lo, w, mu, sigma)
+        upper = mixture_quantile(q_hi, w, mu, sigma)
+
+        # Calculate empirical coverage.
+        coverage = float(
+            np.mean((y >= lower) & (y <= upper))
+        )
+
+        # Calculate mean prediction interval width.
+        width = float(
+            np.mean(upper - lower)
+        )
+
+        # Store the results for this interval level.
+        reports.append({
+            "level": L,
+            "coverage": coverage,
+            "width": width
+        })
+
+    return reports
+

@@ -20,6 +20,7 @@ python scaffold.py
 - [x] **8.** fit
 - [x] **9.** mixture_logpdf
 - [x] **10.** pit_values
+- [x] **11.** interval_report
 
 ---
 
