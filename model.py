@@ -1523,3 +1523,56 @@ def fit_two_head(x, y, hidden=(32, 32), steps=1000, lr=0.01, seed=0):
 
     return predict
 
+# Step 16 - moe_e_step
+def moe_e_step(Phi, y, V, W, sig2):
+    Phi = np.asarray(Phi, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64).reshape(-1)
+    V = np.asarray(V, dtype=np.float64)
+    W = np.asarray(W, dtype=np.float64)
+    sig2 = np.asarray(sig2, dtype=np.float64).reshape(-1)
+
+    if Phi.ndim != 2:
+        raise ValueError("Phi must have shape (n, D)")
+
+    n, d = Phi.shape
+
+    if y.shape != (n,):
+        raise ValueError("y must have shape (n,)")
+    if V.ndim != 2 or V.shape[1] != d:
+        raise ValueError("V must have shape (K, D)")
+    if W.shape != V.shape:
+        raise ValueError("W must have shape (K, D)")
+    if sig2.shape != (V.shape[0],):
+        raise ValueError("sig2 must have shape (K,)")
+    if np.any(~np.isfinite(sig2)) or np.any(sig2 <= 0.0):
+        raise ValueError("expert variances must be finite and positive")
+
+    # Log gate probabilities: log pi_nk = log softmax(Phi @ V.T).
+    gate_logits = Phi @ V.T
+    gate_max = np.max(gate_logits, axis=1, keepdims=True)
+    log_gate = (
+        gate_logits
+        - gate_max
+        - np.log(np.sum(np.exp(gate_logits - gate_max), axis=1, keepdims=True))
+    )
+
+    # Log Gaussian likelihood for each expert and observation.
+    expert_mean = Phi @ W.T
+    residual = y[:, None] - expert_mean
+    log_expert = -0.5 * (
+        np.log(2.0 * np.pi * sig2)[None, :]
+        + residual**2 / sig2[None, :]
+    )
+
+    # Normalize the joint log probabilities across experts.
+    log_joint = log_gate + log_expert
+    row_max = np.max(log_joint, axis=1, keepdims=True)
+    log_norm = row_max + np.log(
+        np.sum(np.exp(log_joint - row_max), axis=1, keepdims=True)
+    )
+
+    r = np.exp(log_joint - log_norm)
+    loglik = float(np.mean(log_norm))
+
+    return r, loglik
+
