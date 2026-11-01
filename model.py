@@ -8,6 +8,7 @@ import numpy as np
 
 # Step 1 - make_growing_noise_data
 import numpy as np
+import time
 
 def make_growing_noise_data(n, seed=0, gap=None):
     """
