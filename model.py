@@ -2704,3 +2704,35 @@ def tune_dropout_rate(
         "model": refit_model
     }
 
+# Step 28 - fit_ensemble
+def fit_ensemble(fit_fn, x, y, M=5, seed=0):
+    if M < 1:
+        raise ValueError("M must be at least 1")
+
+    # Train M independent models with deterministic, distinct seeds.
+    models = [
+        fit_fn(x, y, seed=seed + 100 * m)
+        for m in range(M)
+    ]
+
+    def predict(xq):
+        predictions = [model(xq) for model in models]
+
+        # Each member contributes equally to the ensemble mixture.
+        weights = np.concatenate(
+            [w / M for w, mu, sigma in predictions],
+            axis=1
+        )
+        means = np.concatenate(
+            [mu for w, mu, sigma in predictions],
+            axis=1
+        )
+        sigmas = np.concatenate(
+            [sigma for w, mu, sigma in predictions],
+            axis=1
+        )
+
+        return weights, means, sigmas
+
+    return predict
+
