@@ -150,3 +150,113 @@ def make_inverse_data(n, seed=0):
         np.asarray(y, dtype=np.float64)
     )
 
+# Step 3 - inverse_oracle_nll
+def in_support(yhat, x):
+    """
+    Check whether predicted target values are inside the
+    true conditional support of the inverse problem.
+
+    A prediction is supported when:
+        0 <= yhat <= 1
+        abs(x - forward_curve(yhat)) < 0.1
+
+    Parameters
+    ----------
+    yhat : np.ndarray
+        Predicted target values.
+    x : np.ndarray
+        Corresponding input values.
+
+    Returns
+    -------
+    np.ndarray
+        Boolean array indicating whether each prediction
+        lies inside the true conditional support.
+    """
+
+    yhat = np.asarray(yhat, dtype=np.float64)
+    x = np.asarray(x, dtype=np.float64)
+
+    return (
+        (yhat >= 0.0) &
+        (yhat <= 1.0) &
+        (np.abs(x - forward_curve(yhat)) < 0.1)
+    )
+
+
+def support_size(x):
+    """
+    Estimate the total length of the true conditional support
+    for each input value.
+
+    The support is defined as:
+        S(x) = {y in [0, 1] : abs(x - forward_curve(y)) < 0.1}
+
+    The length is estimated using a grid of 20001 equally
+    spaced points, processed in chunks of 500.
+
+    Parameters
+    ----------
+    x : np.ndarray
+        One-dimensional array of input values.
+
+    Returns
+    -------
+    np.ndarray
+        Estimated support lengths for each input value.
+    """
+
+    x = np.asarray(x, dtype=np.float64)
+
+    # Create the evaluation grid over [0, 1].
+    grid = np.linspace(0.0, 1.0, 20001)
+
+    # Evaluate the forward curve once for the entire grid.
+    curve_grid = forward_curve(grid)
+
+    # Store the estimated support lengths.
+    sizes = np.empty(len(x), dtype=np.float64)
+
+    # Process inputs in chunks of 500 to limit memory usage.
+    for start in range(0, len(x), 500):
+        end = min(start + 500, len(x))
+
+        x_chunk = x[start:end]
+
+        # Check which grid points belong to the support.
+        inside = (
+            np.abs(x_chunk[:, None] - curve_grid[None, :]) < 0.1
+        )
+
+        # Estimate support length as the fraction of grid points
+        # satisfying the support condition.
+        sizes[start:end] = np.mean(inside, axis=1)
+
+    return sizes
+
+
+def inverse_oracle_nll(x):
+    """
+    Calculate the expected negative log-likelihood of the
+    true conditional density for the inverse problem.
+
+    Since Y | X=x is uniform over its conditional support,
+    its negative log-likelihood is log(support_size(x)).
+
+    Parameters
+    ----------
+    x : np.ndarray
+        One-dimensional array of input values.
+
+    Returns
+    -------
+    float
+        Expected negative log-likelihood as a Python float.
+    """
+
+    # Estimate the conditional support lengths.
+    sizes = support_size(x)
+
+    # Calculate the mean negative log-likelihood.
+    return float(np.mean(np.log(sizes)))
+
