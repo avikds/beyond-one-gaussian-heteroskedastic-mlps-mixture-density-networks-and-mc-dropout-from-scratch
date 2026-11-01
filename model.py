@@ -1897,6 +1897,24 @@ def fit_mdn(x, y, K=3, hidden=(32, 32), steps=1000, lr=0.01, seed=0):
     if K < 1:
         raise ValueError("K must be positive")
 
+    # A single-component MDN is equivalent to a heteroskedastic
+    # Gaussian model. Reuse the existing two-headed implementation.
+    if K == 1:
+        gaussian_predict = fit_two_head(
+            x,
+            y,
+            hidden=hidden,
+            steps=steps,
+            lr=lr,
+            seed=seed,
+        )
+
+        def predict_single(xq):
+            w, mu, sigma = gaussian_predict(xq)
+            return np.ones_like(mu), mu, sigma
+
+        return predict_single
+
     # Standardize inputs and targets.
     sx = Standardizer(x)
     sy = Standardizer(y)
@@ -1904,7 +1922,7 @@ def fit_mdn(x, y, K=3, hidden=(32, 32), steps=1000, lr=0.01, seed=0):
     X = sx.forward(x)[:, None]
     Y = sy.forward(y)
 
-    # Shared backbone with K gate logits, K means, and K raw scales.
+    # Shared network: K logits, K means, K raw scales.
     net = DenseNet(
         d_in=1,
         hidden=hidden,
@@ -1912,12 +1930,8 @@ def fit_mdn(x, y, K=3, hidden=(32, 32), steps=1000, lr=0.01, seed=0):
         seed=seed,
     )
 
-    # Break component symmetry through distinct initial mean biases.
-    mean_bias = (
-        np.linspace(-1.2, 1.2, K)
-        if K > 1
-        else np.array([0.0])
-    )
+    # Initialize output biases to break component symmetry.
+    mean_bias = np.linspace(-1.2, 1.2, K)
 
     initial_bias = np.concatenate([
         np.zeros(K, dtype=np.float64),
@@ -1925,7 +1939,6 @@ def fit_mdn(x, y, K=3, hidden=(32, 32), steps=1000, lr=0.01, seed=0):
         np.full(K, float(softplus_inv(0.5))),
     ])
 
-    # Set and realize the output bias.
     bias_tensor = Tensor(
         initial_bias.astype(np.float32),
         dtype=dtypes.float32,
@@ -1933,16 +1946,17 @@ def fit_mdn(x, y, K=3, hidden=(32, 32), steps=1000, lr=0.01, seed=0):
 
     net.layers[-1][1].assign(bias_tensor).realize()
 
-    # Train the network using the mixture negative log-likelihood.
+    # Mixture negative log-likelihood.
     def loss_fn(xb, yb, masks):
-        o = net(xb)
+        output = net(xb)
 
-        logits = o[:, :K]
-        mu = o[:, K:2 * K]
-        sigma = softplus(o[:, 2 * K:]) + SIGMA_FLOOR
+        logits = output[:, :K]
+        mu = output[:, K:2 * K]
+        sigma = softplus(output[:, 2 * K:]) + SIGMA_FLOOR
 
         return mdn_nll(yb, logits, mu, sigma)
 
+    # Train the shared network.
     fit(
         params=net.parameters(),
         loss_fn=loss_fn,
@@ -1957,23 +1971,25 @@ def fit_mdn(x, y, K=3, hidden=(32, 32), steps=1000, lr=0.01, seed=0):
     def predict(xq):
         xq = np.asarray(xq, dtype=np.float64).reshape(-1)
 
-        # Standardize query inputs and run the shared network.
+        # Standardize query inputs.
         Xq = sx.forward(xq)[:, None]
-        o = net.np_forward(Xq)
 
-        logits = o[:, :K]
-        mu_z = o[:, K:2 * K]
-        raw_sigma = o[:, 2 * K:]
+        # Network predictions.
+        output = net.np_forward(Xq)
 
-        # Convert logits to normalized mixture weights.
+        logits = output[:, :K]
+        mu_z = output[:, K:2 * K]
+        raw_sigma = output[:, 2 * K:]
+
+        # Stable softmax gate probabilities.
         logits = logits - np.max(logits, axis=1, keepdims=True)
         exp_logits = np.exp(logits)
         w = exp_logits / np.sum(exp_logits, axis=1, keepdims=True)
 
-        # Convert raw scales to positive standard deviations.
+        # Positive component standard deviations.
         sigma_z = np.logaddexp(0.0, raw_sigma) + SIGMA_FLOOR
 
-        # Convert Gaussian parameters to original target units.
+        # Convert means and scales to original target units.
         mu, sigma = sy.scale_density(mu_z, sigma_z)
 
         return w, mu, sigma
