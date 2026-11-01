@@ -21,6 +21,7 @@ python scaffold.py
 - [x] **9.** mixture_logpdf
 - [x] **10.** pit_values
 - [x] **11.** interval_report
+- [x] **12.** coverage_by_region
 
 ---
 

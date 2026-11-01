@@ -1041,3 +1041,141 @@ def interval_report(y, w, mu, sigma, levels=(0.5, 0.8, 0.9, 0.95)):
 
     return reports
 
+# Step 12 - coverage_by_region
+def coverage_by_region(x, y, w, mu, sigma, edges, level=0.9):
+    """
+    Calculate predictive interval coverage and negative log-likelihood
+    separately for consecutive regions of the input space.
+
+    Parameters
+    ----------
+    x : np.ndarray
+        Input values of shape (n,).
+
+    y : np.ndarray
+        Observed target values of shape (n,).
+
+    w : np.ndarray
+        Gaussian mixture weights of shape (n, K).
+
+    mu : np.ndarray
+        Gaussian component means of shape (n, K).
+
+    sigma : np.ndarray
+        Gaussian component standard deviations of shape (n, K).
+
+    edges : array-like
+        Increasing sequence of bin edges.
+
+    level : float, default=0.9
+        Central prediction interval level.
+
+    Returns
+    -------
+    list
+        One dictionary per input region containing:
+        - lo: Lower boundary of the region.
+        - hi: Upper boundary of the region.
+        - n: Number of observations in the region.
+        - coverage: Empirical interval coverage.
+        - width: Mean prediction interval width.
+        - nll: Mean negative log-likelihood.
+    """
+
+    # Convert inputs to float64 NumPy arrays.
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    w = np.asarray(w, dtype=np.float64)
+    mu = np.asarray(mu, dtype=np.float64)
+    sigma = np.asarray(sigma, dtype=np.float64)
+    edges = np.asarray(edges, dtype=np.float64)
+
+    # Validate the input dimensions.
+    if x.ndim != 1 or y.ndim != 1:
+        raise ValueError("x and y must be one-dimensional arrays")
+
+    if w.ndim != 2 or mu.ndim != 2 or sigma.ndim != 2:
+        raise ValueError("w, mu and sigma must be two-dimensional arrays")
+
+    if not (len(x) == len(y) == w.shape[0] == mu.shape[0] == sigma.shape[0]):
+        raise ValueError("All input arrays must have the same number of observations")
+
+    if w.shape != mu.shape or w.shape != sigma.shape:
+        raise ValueError("w, mu and sigma must have identical shapes")
+
+    if edges.ndim != 1 or len(edges) < 2:
+        raise ValueError("edges must contain at least two values")
+
+    if not np.all(np.diff(edges) > 0):
+        raise ValueError("edges must be strictly increasing")
+
+    # Store the regional evaluation results.
+    results = []
+
+    # Process each consecutive pair of bin edges.
+    for a, b in zip(edges[:-1], edges[1:]):
+
+        # Select observations belonging to the current region.
+        # The lower boundary is inclusive and the upper boundary
+        # is exclusive: a <= x < b.
+        mask = (x >= a) & (x < b)
+
+        # Count observations in this region.
+        n_region = int(np.sum(mask))
+
+        # Handle empty regions: their evaluation metrics are undefined.
+        if n_region == 0:
+            results.append({
+                "lo": float(a),
+                "hi": float(b),
+                "n": 0,
+                "coverage": float("nan"),
+                "width": float("nan"),
+                "nll": float("nan")
+            })
+            continue
+
+        # Extract observations and mixture parameters for this region.
+        x_region = x[mask]
+        y_region = y[mask]
+        w_region = w[mask]
+        mu_region = mu[mask]
+        sigma_region = sigma[mask]
+
+        # Calculate the interval coverage and average width.
+        report = interval_report(
+            y_region,
+            w_region,
+            mu_region,
+            sigma_region,
+            levels=(level,)
+        )
+
+        # Extract the report for the requested interval level.
+        coverage = float(report[0]["coverage"])
+        width = float(report[0]["width"])
+
+        # Calculate mean negative log-likelihood for this region.
+        nll = float(
+            -np.mean(
+                mixture_logpdf(
+                    y_region,
+                    w_region,
+                    mu_region,
+                    sigma_region
+                )
+            )
+        )
+
+        # Store the results for this region.
+        results.append({
+            "lo": float(a),
+            "hi": float(b),
+            "n": n_region,
+            "coverage": coverage,
+            "width": width,
+            "nll": nll
+        })
+
+    return results
+
