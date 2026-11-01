@@ -2246,8 +2246,6 @@ def fit_hme(x, y, steps=1500, lr=0.01, seed=0):
     return predict
 
 # Step 25 - fit_dropout
-# ── Step 025  fit_dropout ──
-
 def dropout_masks(rng, n, hidden, p):
     """
     Generate one independent Bernoulli dropout mask per hidden layer.
