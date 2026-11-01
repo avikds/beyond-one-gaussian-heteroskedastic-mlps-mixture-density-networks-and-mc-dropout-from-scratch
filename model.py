@@ -643,47 +643,13 @@ class Adam:
         return [self.t, *self.params, *self.m, *self.v]
 
 # Step 8 - fit
-from tinygrad import TinyJit, dtypes
-
-
 def fit(params, loss_fn, X, Y, steps=1000, lr=0.01,
         mask_fn=None, seed=0):
-    """
-    Train a neural network using a TinyJit full-batch training loop.
-
-    Parameters
-    ----------
-    params : list
-        Trainable tinygrad tensors.
-    loss_fn : callable
-        Loss function with signature loss_fn(xb, yb, masks).
-        Must return a scalar tinygrad Tensor.
-    X : np.ndarray
-        Input training data.
-    Y : np.ndarray
-        Target training data.
-    steps : int, default=1000
-        Number of optimization steps.
-    lr : float, default=0.01
-        Initial learning rate.
-    mask_fn : callable or None, default=None
-        Optional function mask_fn(rng, n) that generates
-        fresh dropout masks for each training step.
-    seed : int, default=0
-        Random seed for dropout mask generation.
-
-    Returns
-    -------
-    list
-        Training history containing (step, loss) pairs.
-        Records are saved every 500 steps and at the final step.
-    """
 
     # Initialize the Adam optimizer.
     opt = Adam(params)
 
-    # Convert input and target arrays to realized float32 tensors.
-    # This conversion is performed only once.
+    # Convert training data to realized float32 tensors once.
     xb = Tensor(
         np.asarray(X, dtype=np.float32)
     ).contiguous().realize()
@@ -692,58 +658,54 @@ def fit(params, loss_fn, X, Y, steps=1000, lr=0.01,
         np.asarray(Y, dtype=np.float32)
     ).contiguous().realize()
 
-    # Dedicated random stream for generating dropout masks.
+    # Dedicated random stream for dropout masks.
     rng = np.random.default_rng([seed, 3])
 
-    # Define the inner training step.
     def step(xb, yb, lr_t, *masks):
 
-        # Pass None when dropout is disabled.
-        # Otherwise, pass the tuple of mask tensors.
         current_masks = tuple(masks) if mask_fn is not None else None
 
-        # Compute the loss.
+        # Calculate the loss.
         loss = loss_fn(xb, yb, current_masks)
 
-        # Calculate gradients with respect to all parameters.
+        # Calculate gradients using the current parameters.
         grads = loss.gradient(*params)
 
-        # Update the model parameters using Adam.
+        # IMPORTANT:
+        # Realize the loss and gradients BEFORE modifying parameters.
+        # This prevents problematic dependencies in the JIT graph.
+        Tensor.realize(loss, *grads)
+
+        # Perform the Adam update.
         updated_tensors = opt.step(grads, lr_t)
 
-        # Realize the loss, optimizer counter, parameters,
-        # first moments, and second moments.
-        Tensor.realize(loss, *updated_tensors)
+        # Realize the updated counter, parameters and optimizer buffers.
+        Tensor.realize(*updated_tensors)
 
-        # Return the realized loss.
         return loss
 
-    # Compile the training step using TinyJit.
+    # Compile the training step.
     step = TinyJit(step)
 
-    # Store training loss history.
     history = []
 
-    # Full-batch training loop.
     for t in range(steps):
 
-        # Calculate the cosine learning-rate schedule.
+        # Cosine learning-rate schedule.
         lr_value = lr * 0.5 * (
             1.0 + math.cos(math.pi * t / steps)
         )
 
-        # Convert learning rate into a one-element float32 Tensor.
         lr_t = Tensor(
             [lr_value],
             dtype=dtypes.float32
         ).contiguous().realize()
 
-        # Generate fresh dropout masks for this training step.
+        # Generate fresh dropout masks when required.
         if mask_fn is not None:
 
             mask_arrays = mask_fn(rng, len(X))
 
-            # Convert each NumPy mask into a realized float32 Tensor.
             mask_tensors = tuple(
                 Tensor(
                     np.asarray(mask, dtype=np.float32)
@@ -754,12 +716,14 @@ def fit(params, loss_fn, X, Y, steps=1000, lr=0.01,
         else:
             mask_tensors = ()
 
-        # Execute the TinyJit training step.
+        # Execute one training step.
         loss = step(xb, yb, lr_t, *mask_tensors)
 
         # Record loss every 500 steps and at the final step.
         if t % 500 == 0 or t == steps - 1:
-            history.append((int(t), float(loss.numpy())))
+            history.append(
+                (int(t), float(loss.numpy()))
+            )
 
     return history
 
@@ -1321,6 +1285,141 @@ def fit_fixed_sigma(x, y, hidden=(32, 32), steps=1000, lr=0.01, seed=0):
         w = np.ones_like(mu, dtype=np.float64)
 
         return w, mu, sigma
+
+    return predict
+
+# Step 15 - fit_two_head
+def gaussian_head_params(o, sy):
+    """
+    Convert two-headed Gaussian network outputs into predictive
+    Gaussian parameters in the original target units.
+
+    Parameters
+    ----------
+    o : np.ndarray
+        Network outputs of shape (n, 2).
+        Column 0: predicted mean.
+        Column 1: raw predicted standard deviation.
+    sy : Standardizer
+        Target standardizer.
+
+    Returns
+    -------
+    tuple
+        (w, mu, sigma), each with shape (n, 1).
+    """
+
+    # Ensure float64 precision.
+    o = np.asarray(o, dtype=np.float64)
+
+    # Extract the predicted mean in standardized units.
+    mu_z = o[:, 0:1]
+
+    # Calculate a numerically stable Softplus using NumPy.
+    sigma_z = np.logaddexp(0.0, o[:, 1:2]) + SIGMA_FLOOR
+
+    # Convert Gaussian parameters into original target units.
+    mu, sigma = sy.scale_density(mu_z, sigma_z)
+
+    # One Gaussian component per input.
+    w = np.ones_like(mu, dtype=np.float64)
+
+    return w, mu, sigma
+
+
+def fit_two_head(x, y, hidden=(32, 32), steps=1000, lr=0.01, seed=0):
+    """
+    Train a heteroskedastic Gaussian MLP with a shared backbone
+    and separate mean and standard-deviation output heads.
+
+    Parameters
+    ----------
+    x : np.ndarray
+        One-dimensional input array.
+    y : np.ndarray
+        One-dimensional target array.
+    hidden : tuple or list
+        Hidden layer widths.
+    steps : int
+        Number of training steps.
+    lr : float
+        Initial learning rate.
+    seed : int
+        Random seed.
+
+    Returns
+    -------
+    predict : callable
+        Prediction function returning (w, mu, sigma), each
+        of shape (n, 1), in original target units.
+    """
+
+    # Convert inputs and targets to float64.
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+
+    # Step 1: Standardize inputs and targets.
+    sx = Standardizer(x)
+    sy = Standardizer(y)
+
+    X = sx.forward(x)[:, None]
+    Y = sy.forward(y)
+
+    # Step 2: Initialize a network with two output units.
+    net = DenseNet(1, hidden, 2, seed=seed)
+
+    # Initialize output biases so that the initial predictions are:
+    # mean = 0 and standard deviation approximately = 1.
+    initial_bias = Tensor(
+        [0.0, float(softplus_inv(1.0))],
+        dtype=dtypes.float32
+    ).contiguous().realize()
+
+    net.layers[-1][1].assign(initial_bias).realize()
+
+    # Step 3: Define the Gaussian negative log-likelihood loss.
+    def loss_fn(xb, yb, masks):
+
+        # Forward pass.
+        o = net(xb)
+
+        # Extract the two output heads.
+        mu_z = o[:, 0].contiguous()
+        raw_sigma = o[:, 1].contiguous()
+
+        # Smooth, equivalent Softplus expression.
+        # The standardized network output stays in the normal
+        # operating range during this training task.
+        sigma_z = (1.0 + raw_sigma.exp()).log() + SIGMA_FLOOR
+
+        # Gaussian negative log-likelihood.
+        return gaussian_nll(yb, mu_z, sigma_z)
+
+    # Train using the previously implemented TinyJit training loop.
+    fit(
+        net.parameters(),
+        loss_fn,
+        X,
+        Y,
+        steps=steps,
+        lr=lr,
+        seed=seed
+    )
+
+    # Step 4: Define the prediction function.
+    def predict(xq):
+
+        # Convert query inputs to a one-dimensional float64 array.
+        xq = np.asarray(xq, dtype=np.float64).reshape(-1)
+
+        # Standardize query inputs.
+        Xq = sx.forward(xq)[:, None]
+
+        # Obtain the two network outputs.
+        o = net.np_forward(Xq)
+
+        # Convert into Gaussian mixture parameters.
+        return gaussian_head_params(o, sy)
 
     return predict
 
