@@ -661,10 +661,10 @@ class Adam:
 def fit(params, loss_fn, X, Y, steps=1000, lr=0.01,
         mask_fn=None, seed=0):
 
-    # Initialize the hand-written Adam optimizer.
+    # Initialize Adam.
     opt = Adam(params)
 
-    # Convert training data into realized float32 tensors.
+    # Convert training data to realized float32 tensors.
     xb = Tensor(
         np.asarray(X, dtype=np.float32)
     ).contiguous().realize()
@@ -673,32 +673,36 @@ def fit(params, loss_fn, X, Y, steps=1000, lr=0.01,
         np.asarray(Y, dtype=np.float32)
     ).contiguous().realize()
 
-    # Dedicated random generator for dropout masks.
+    # Dedicated random generator.
     rng = np.random.default_rng([seed, 3])
 
-    # Define one full-batch training step.
-    def step(xb, yb, lr_t, *masks):
+    # ---------------------------------------------
+    # JIT-compiled gradient calculation only.
+    # ---------------------------------------------
+    def gradient_step(xb, yb, *masks):
 
         current_masks = (
             tuple(masks) if mask_fn is not None else None
         )
 
-        # Forward pass and loss calculation.
+        # Calculate loss.
         loss = loss_fn(xb, yb, current_masks)
 
-        # Automatic differentiation.
+        # Calculate gradients.
         grads = loss.gradient(*params)
 
-        # Calculate Adam updates.
-        updated = opt.step(grads, lr_t)
+        # Realize gradients separately.
+        for g in grads:
+            g.realize()
 
-        # Realize the loss and all optimizer updates together.
-        Tensor.realize(loss, *updated)
+        # Realize loss separately.
+        loss.realize()
 
-        return loss
+        # Return loss and gradients as JIT outputs.
+        return (loss, *grads)
 
-    # Compile the training step.
-    step = TinyJit(step)
+    # Compile the gradient calculation.
+    gradient_step = TinyJit(gradient_step)
 
     history = []
 
@@ -714,7 +718,7 @@ def fit(params, loss_fn, X, Y, steps=1000, lr=0.01,
             dtype=dtypes.float32
         ).contiguous().realize()
 
-        # Generate fresh dropout masks for each step.
+        # Generate fresh dropout masks.
         if mask_fn is not None:
 
             mask_arrays = mask_fn(rng, len(X))
@@ -729,8 +733,17 @@ def fit(params, loss_fn, X, Y, steps=1000, lr=0.01,
         else:
             mask_tensors = ()
 
-        # Execute the JIT-compiled training step.
-        loss = step(xb, yb, lr_t, *mask_tensors)
+        # Run the JIT-compiled forward and gradient computation.
+        outputs = gradient_step(
+            xb, yb, *mask_tensors
+        )
+
+        loss = outputs[0]
+        grads = outputs[1:]
+
+        # IMPORTANT:
+        # Perform all Adam updates OUTSIDE TinyJit.
+        opt.step(grads, lr_t)
 
         # Record loss every 500 steps and at the final step.
         if t % 500 == 0 or t == steps - 1:
