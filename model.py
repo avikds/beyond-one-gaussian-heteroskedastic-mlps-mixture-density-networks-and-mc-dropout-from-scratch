@@ -2088,3 +2088,154 @@ def density_set_report(y, w, mu, sigma, grid, level=0.9):
         "length": float(np.mean(lengths)),
     }
 
+# Step 24 - fit_hme
+def hme_forward(xb, params):
+    V_top, V_sub, W, a = params
+
+    # Design matrix: intercept and standardized input.
+    Phi = Tensor.cat(
+        Tensor.ones(xb.shape[0], 1),
+        xb,
+        dim=1,
+    )
+
+    # Top-level gate: probabilities of the two branches.
+    log_top = (
+        Phi @ V_top.transpose()
+    ).log_softmax(axis=1)
+
+    # One two-way sub-gate for each top-level branch.
+    log_sub_0 = (
+        Phi @ V_sub[0].transpose()
+    ).log_softmax(axis=1)
+
+    log_sub_1 = (
+        Phi @ V_sub[1].transpose()
+    ).log_softmax(axis=1)
+
+    # Four joint path log-weights, ordered by (top, sub).
+    log_w = Tensor.cat(
+        log_top[:, 0:1] + log_sub_0[:, 0:1],
+        log_top[:, 0:1] + log_sub_0[:, 1:2],
+        log_top[:, 1:2] + log_sub_1[:, 0:1],
+        log_top[:, 1:2] + log_sub_1[:, 1:2],
+        dim=1,
+    )
+
+    # Four linear expert means.
+    mu = Phi @ W.transpose()
+
+    # Four positive expert standard deviations.
+    sigma = (
+        softplus(a)
+        .reshape(1, 4)
+        .expand(xb.shape[0], 4)
+        + SIGMA_FLOOR
+    )
+
+    return log_w, mu, sigma
+
+
+def fit_hme(x, y, steps=1500, lr=0.01, seed=0):
+    x = np.asarray(x, dtype=np.float64).reshape(-1)
+    y = np.asarray(y, dtype=np.float64).reshape(-1)
+
+    if x.shape != y.shape:
+        raise ValueError("x and y must have the same number of observations")
+    if x.size == 0:
+        raise ValueError("Training data cannot be empty")
+
+    # Standardize inputs and targets.
+    sx = Standardizer(x)
+    sy = Standardizer(y)
+
+    X = sx.forward(x).reshape(-1, 1)
+    Y = sy.forward(y)
+
+    # Initialize parameters in the specified order.
+    rng = np.random.default_rng(seed)
+
+    V_top = Tensor(
+        rng.normal(0.0, 0.5, size=(2, 2)).astype(np.float32)
+    ).contiguous().realize()
+
+    V_sub = Tensor(
+        rng.normal(0.0, 0.5, size=(2, 2, 2)).astype(np.float32)
+    ).contiguous().realize()
+
+    W = Tensor(
+        rng.normal(0.0, 0.5, size=(4, 2)).astype(np.float32)
+    ).contiguous().realize()
+
+    a = Tensor(
+        np.full(
+            4,
+            float(softplus_inv(0.5)),
+            dtype=np.float32,
+        )
+    ).contiguous().realize()
+
+    # Train all hierarchical gates and experts jointly.
+    params = [V_top, V_sub, W, a]
+
+    def loss_fn(xb, yb, masks):
+        log_w, mu, sigma = hme_forward(xb, params)
+
+        return mdn_nll(
+            yb,
+            log_w,
+            mu,
+            sigma,
+        )
+
+    fit(
+        params=params,
+        loss_fn=loss_fn,
+        X=X,
+        Y=Y,
+        steps=steps,
+        lr=lr,
+        mask_fn=None,
+        seed=seed,
+    )
+
+    def predict(xq):
+        xq = np.asarray(xq, dtype=np.float64).reshape(-1)
+
+        # Standardize query inputs.
+        xq_z = sx.forward(xq).reshape(-1, 1)
+
+        xb = Tensor(
+            xq_z.astype(np.float32)
+        ).contiguous().realize()
+
+        # Evaluate the trained hierarchical model.
+        log_w, mu_z, sigma_z = hme_forward(
+            xb,
+            params,
+        )
+
+        # Convert predictions to NumPy arrays.
+        log_w_np = log_w.numpy().astype(np.float64)
+        mu_z_np = mu_z.numpy().astype(np.float64)
+        sigma_z_np = sigma_z.numpy().astype(np.float64)
+
+        # Convert joint log-weights into probabilities.
+        log_w_np -= np.max(log_w_np, axis=1, keepdims=True)
+        exp_log_w = np.exp(log_w_np)
+        w = exp_log_w / np.sum(
+            exp_log_w,
+            axis=1,
+            keepdims=True,
+        )
+
+        # Convert expert means and scales to original y units.
+        mu, sigma = sy.scale_density(
+            mu_z_np,
+            sigma_z_np,
+        )
+
+        return w, mu, sigma
+
+    return predict
+

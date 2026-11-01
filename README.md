@@ -33,6 +33,7 @@ python scaffold.py
 - [x] **21.** mdn_grads
 - [x] **22.** fit_mdn
 - [x] **23.** density_set_report
+- [x] **24.** fit_hme
 
 ---
 
