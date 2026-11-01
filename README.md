@@ -14,6 +14,7 @@ python scaffold.py
 - [x] **2.** make_inverse_data
 - [x] **3.** inverse_oracle_nll
 - [x] **4.** Standardizer
+- [x] **5.** softplus
 
 ---
 

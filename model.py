@@ -316,3 +316,64 @@ class Standardizer:
 
         return mu, sigma
 
+# Step 5 - softplus
+from tinygrad import Tensor
+
+
+def softplus(a):
+    """
+    Numerically stable Softplus activation.
+
+    Computes:
+        softplus(a) = log(1 + exp(a))
+
+    Uses the equivalent stable expression:
+        max(a, 0) + log(1 + exp(-abs(a)))
+
+    This avoids overflow for large positive inputs.
+
+    Parameters
+    ----------
+    a : Tensor
+        Input tinygrad tensor.
+
+    Returns
+    -------
+    Tensor
+        Softplus activation applied element-wise.
+    """
+
+    return a.relu() + (1 + (-a.abs()).exp()).log()
+
+
+def softplus_inv(s):
+    """
+    Numerically stable inverse Softplus.
+
+    Computes:
+        softplus_inv(s) = log(exp(s) - 1)
+
+    Uses the equivalent expression:
+        s + log(1 - exp(-s))
+
+    The expm1 function improves numerical accuracy
+    for very small positive values.
+
+    Parameters
+    ----------
+    s : float or np.ndarray
+        Positive input values.
+
+    Returns
+    -------
+    np.ndarray or np.float64
+        Inverse Softplus values in float64 precision.
+    """
+
+    s = np.asarray(s, dtype=np.float64)
+
+    if np.any(s <= 0):
+        raise ValueError("softplus_inv requires strictly positive inputs")
+
+    return s + np.log(-np.expm1(-s))
+
