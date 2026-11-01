@@ -1179,3 +1179,37 @@ def coverage_by_region(x, y, w, mu, sigma, edges, level=0.9):
 
     return results
 
+# Step 13 - gaussian_nll
+# Minimum permitted predicted standard deviation in standardized units.
+SIGMA_FLOOR = 1e-3
+
+
+def gaussian_nll(y, mu, sigma):
+    """
+    Calculate the mean Gaussian negative log-likelihood.
+
+    Parameters
+    ----------
+    y : Tensor
+        Actual target values.
+    mu : Tensor
+        Predicted Gaussian means.
+    sigma : Tensor
+        Predicted Gaussian standard deviations (strictly positive).
+
+    Returns
+    -------
+    Tensor
+        Scalar mean negative log-likelihood.
+    """
+
+    # Calculate the Gaussian negative log-likelihood element-wise.
+    nll = (
+        sigma.log()
+        + 0.5 * math.log(2.0 * math.pi)
+        + ((y - mu) ** 2) / (2.0 * sigma ** 2)
+    )
+
+    # Return the mean NLL across all observations.
+    return nll.mean()
+

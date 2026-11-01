@@ -22,6 +22,7 @@ python scaffold.py
 - [x] **10.** pit_values
 - [x] **11.** interval_report
 - [x] **12.** coverage_by_region
+- [x] **13.** gaussian_nll
 
 ---
 
