@@ -1320,11 +1320,7 @@ def gaussian_head_params(o, sy):
     mu_z = o[:, 0:1]
 
     # Second output head: positive scale in standardized units.
-    # np.logaddexp provides a numerically stable Softplus.
-    sigma_z = (
-        np.logaddexp(0.0, o[:, 1:2])
-        + SIGMA_FLOOR
-    )
+    sigma_z = np.logaddexp(0.0, o[:, 1:2]) + SIGMA_FLOOR
 
     # Convert mean and standard deviation to original units.
     mu, sigma = sy.scale_density(mu_z, sigma_z)
@@ -1334,7 +1330,6 @@ def gaussian_head_params(o, sy):
 
     return w, mu, sigma
 
-
 def fit_two_head(x, y, hidden=(32, 32), steps=1000, lr=0.01, seed=0):
     """
     Train a heteroskedastic Gaussian MLP with two output heads.
@@ -1342,33 +1337,18 @@ def fit_two_head(x, y, hidden=(32, 32), steps=1000, lr=0.01, seed=0):
     The first output predicts the conditional mean.
     The second output predicts the input-dependent standard deviation.
 
-    Parameters
-    ----------
-    x : np.ndarray
-        One-dimensional training inputs.
-    y : np.ndarray
-        One-dimensional training targets.
-    hidden : tuple or list
-        Hidden-layer widths.
-    steps : int
-        Number of training steps.
-    lr : float
-        Initial learning rate.
-    seed : int
-        Random seed.
+    Backpropagation and Adam updates are computed in NumPy to avoid
+    a tinygrad CFGContext compilation failure in this model's
+    two-headed Gaussian likelihood graph.
 
-    Returns
-    -------
-    callable
-        Prediction function returning (w, mu, sigma),
-        each with shape (n, 1), in original target units.
+    Returns a prediction function producing (w, mu, sigma) in
+    original target units.
     """
 
     # Convert training data to float64 and flatten.
     x = np.asarray(x, dtype=np.float64).reshape(-1)
     y = np.asarray(y, dtype=np.float64).reshape(-1)
 
-    # Validate training data.
     if x.size != y.size:
         raise ValueError(
             "x and y must contain the same number of observations"
@@ -1377,20 +1357,17 @@ def fit_two_head(x, y, hidden=(32, 32), steps=1000, lr=0.01, seed=0):
     if x.size == 0:
         raise ValueError("Training data cannot be empty")
 
-    # --------------------------------------------------
-    # Step 1: Standardize inputs and targets.
-    # --------------------------------------------------
+    if steps < 0:
+        raise ValueError("steps must be non-negative")
 
+    # Standardize inputs and targets.
     sx = Standardizer(x)
     sy = Standardizer(y)
 
-    X = sx.forward(x)[:, None]
-    Y = sy.forward(y)
+    X = sx.forward(x)[:, None].astype(np.float64)
+    Y = sy.forward(y).astype(np.float64)
 
-    # --------------------------------------------------
-    # Step 2: Create a shared-backbone, two-headed MLP.
-    # --------------------------------------------------
-
+    # Create the shared-backbone, two-headed network.
     net = DenseNet(
         d_in=1,
         hidden=hidden,
@@ -1398,82 +1375,151 @@ def fit_two_head(x, y, hidden=(32, 32), steps=1000, lr=0.01, seed=0):
         seed=seed
     )
 
-    # Initialize the output bias:
-    # mean head = 0
-    # raw sigma head = inverse Softplus of 1.
-    #
-    # This makes the initial predicted standard deviation
-    # approximately 1 in standardized target units.
+    # Initialize the output bias so the initial standardized
+    # predicted standard deviation is approximately one.
     initial_bias = Tensor(
         [0.0, float(softplus_inv(1.0))],
         dtype=dtypes.float32
     ).contiguous().realize()
 
-    # Assign and realize the initial output bias.
     net.layers[-1][1].assign(initial_bias).realize()
 
-    # --------------------------------------------------
-    # Step 3: Define the heteroskedastic Gaussian NLL.
-    # --------------------------------------------------
+    # Copy the tinygrad parameters into NumPy arrays.
+    # The network architecture and initialization remain unchanged.
+    weights = [
+        W.numpy().astype(np.float64)
+        for W, b in net.layers
+    ]
 
-    def loss_fn(xb, yb, masks):
+    biases = [
+        b.numpy().astype(np.float64)
+        for W, b in net.layers
+    ]
 
-        # Forward pass through the shared network.
-        o = net(xb)
+    # Initialize Adam moment estimates.
+    m_w = [np.zeros_like(W) for W in weights]
+    v_w = [np.zeros_like(W) for W in weights]
+    m_b = [np.zeros_like(b) for b in biases]
+    v_b = [np.zeros_like(b) for b in biases]
 
-        # Mean head.
-        mu_z = o[:, 0]
+    beta1 = 0.9
+    beta2 = 0.999
+    eps = 1e-8
 
-        # Scale head, made strictly positive by Softplus.
-        sigma_z = softplus(o[:, 1]) + SIGMA_FLOOR
+    n = len(X)
 
-        # Gaussian negative log-likelihood.
-        return gaussian_nll(
-            yb,
-            mu_z,
-            sigma_z
+    # Train using full-batch Gaussian negative log-likelihood.
+    for t in range(1, steps + 1):
+
+        # Forward pass through the hidden layers.
+        activations = [X]
+
+        for W, b in zip(weights[:-1], biases[:-1]):
+            h = np.tanh(activations[-1] @ W + b)
+            activations.append(h)
+
+        # Linear output layer.
+        output = activations[-1] @ weights[-1] + biases[-1]
+
+        mu_z = output[:, 0]
+        raw_sigma = output[:, 1]
+
+        # Stable NumPy Softplus and its derivative.
+        sigma_z = np.logaddexp(0.0, raw_sigma) + SIGMA_FLOOR
+
+        sigmoid_raw = 1.0 / (
+            1.0 + np.exp(-np.clip(raw_sigma, -60.0, 60.0))
         )
 
-    # --------------------------------------------------
-    # Step 4: Train using the existing fit function.
-    # --------------------------------------------------
+        # Gaussian NLL derivatives.
+        residual = Y - mu_z
 
-    fit(
-        params=net.parameters(),
-        loss_fn=loss_fn,
-        X=X,
-        Y=Y,
-        steps=steps,
-        lr=lr,
-        mask_fn=None,
-        seed=seed
-    )
+        d_mu = (mu_z - Y) / (sigma_z ** 2 * n)
 
-    # --------------------------------------------------
-    # Step 5: Define the prediction function.
-    # --------------------------------------------------
+        d_sigma = (
+            1.0 / sigma_z
+            - residual ** 2 / sigma_z ** 3
+        ) / n
 
+        d_raw_sigma = d_sigma * sigmoid_raw
+
+        # Gradient with respect to the two output columns.
+        d_output = np.column_stack((d_mu, d_raw_sigma))
+
+        # Allocate gradient arrays.
+        grad_w = [None] * len(weights)
+        grad_b = [None] * len(biases)
+
+        # Output layer gradients.
+        grad_w[-1] = activations[-1].T @ d_output
+        grad_b[-1] = np.sum(d_output, axis=0)
+
+        # Backpropagate through the hidden layers.
+        d_hidden = d_output @ weights[-1].T
+
+        for layer in range(len(weights) - 2, -1, -1):
+
+            hidden_output = activations[layer + 1]
+
+            d_pre = d_hidden * (1.0 - hidden_output ** 2)
+
+            grad_w[layer] = activations[layer].T @ d_pre
+            grad_b[layer] = np.sum(d_pre, axis=0)
+
+            if layer > 0:
+                d_hidden = d_pre @ weights[layer].T
+
+        # Cosine learning-rate schedule, matching Step 8.
+        lr_t = lr * 0.5 * (
+            1.0 + math.cos(math.pi * (t - 1) / max(steps, 1))
+        )
+
+        # Adam updates.
+        for j in range(len(weights)):
+
+            m_w[j] = beta1 * m_w[j] + (1.0 - beta1) * grad_w[j]
+            v_w[j] = beta2 * v_w[j] + (1.0 - beta2) * grad_w[j] ** 2
+
+            m_b[j] = beta1 * m_b[j] + (1.0 - beta1) * grad_b[j]
+            v_b[j] = beta2 * v_b[j] + (1.0 - beta2) * grad_b[j] ** 2
+
+            # Bias correction.
+            m_w_hat = m_w[j] / (1.0 - beta1 ** t)
+            v_w_hat = v_w[j] / (1.0 - beta2 ** t)
+
+            m_b_hat = m_b[j] / (1.0 - beta1 ** t)
+            v_b_hat = v_b[j] / (1.0 - beta2 ** t)
+
+            # Update weights and biases.
+            weights[j] -= lr_t * m_w_hat / (
+                np.sqrt(v_w_hat) + eps
+            )
+
+            biases[j] -= lr_t * m_b_hat / (
+                np.sqrt(v_b_hat) + eps
+            )
+
+    # Copy trained NumPy parameters back into the tinygrad network.
+    for j, (W_tensor, b_tensor) in enumerate(net.layers):
+
+        W_tensor.assign(
+            Tensor(weights[j].astype(np.float32)).contiguous()
+        ).realize()
+
+        b_tensor.assign(
+            Tensor(biases[j].astype(np.float32)).contiguous()
+        ).realize()
+
+    # Prediction function.
     def predict(xq):
-        """
-        Predict Gaussian parameters for query inputs.
 
-        Returns
-        -------
-        tuple
-            w, mu, sigma, each of shape (n, 1).
-        """
-
-        # Convert query inputs to float64.
         xq = np.asarray(xq, dtype=np.float64).reshape(-1)
 
-        # Standardize query inputs.
         Xq = sx.forward(xq)[:, None]
 
-        # Get the two network outputs.
-        o = net.np_forward(Xq)
+        output = net.np_forward(Xq)
 
-        # Convert network outputs into original target units.
-        return gaussian_head_params(o, sy)
+        return gaussian_head_params(output, sy)
 
     return predict
 
