@@ -28,6 +28,7 @@ python scaffold.py
 - [x] **16.** moe_e_step
 - [x] **17.** moe_m_step
 - [x] **18.** fit_mole
+- [x] **19.** point_report
 
 ---
 

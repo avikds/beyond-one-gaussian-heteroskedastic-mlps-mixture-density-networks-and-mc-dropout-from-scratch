@@ -1744,3 +1744,49 @@ def fit_mole(x, y, K=3, n_iter=200, restarts=8, seed=0, gate_steps=20, gate_lr=1
         "predict": predict,
     }
 
+# Step 19 - point_report
+def mean_and_mode(w, mu):
+    w = np.asarray(w, dtype=np.float64)
+    mu = np.asarray(mu, dtype=np.float64)
+
+    if w.ndim != 2 or mu.ndim != 2:
+        raise ValueError("w and mu must have shape (n, K)")
+    if w.shape != mu.shape:
+        raise ValueError("w and mu must have the same shape")
+    if w.shape[1] == 0:
+        raise ValueError("at least one expert is required")
+
+    # Conditional mean: weighted average of expert means.
+    mean = np.sum(w * mu, axis=1)
+
+    # Most-active-expert prediction: select the largest gate weight.
+    active_expert = np.argmax(w, axis=1)
+    mode = mu[np.arange(mu.shape[0]), active_expert]
+
+    return mean, mode
+
+
+def point_report(x, y, w, mu):
+    x = np.asarray(x, dtype=np.float64).reshape(-1)
+    y = np.asarray(y, dtype=np.float64).reshape(-1)
+
+    mean, mode = mean_and_mode(w, mu)
+
+    if x.shape != y.shape or mean.shape != y.shape:
+        raise ValueError("x, y, w, and mu must have matching observation counts")
+
+    # Root mean squared prediction errors.
+    rmse_mean = float(np.sqrt(np.mean((mean - y) ** 2)))
+    rmse_mode = float(np.sqrt(np.mean((mode - y) ** 2)))
+
+    # Fraction of predictions that lie inside the true conditional support.
+    support_mean = float(np.mean(in_support(mean, x)))
+    support_mode = float(np.mean(in_support(mode, x)))
+
+    return {
+        "rmse_mean": rmse_mean,
+        "rmse_mode": rmse_mode,
+        "support_mean": support_mean,
+        "support_mode": support_mode,
+    }
+
