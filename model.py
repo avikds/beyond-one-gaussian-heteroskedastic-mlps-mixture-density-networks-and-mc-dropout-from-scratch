@@ -2769,3 +2769,398 @@ def uncertainty_split(w, mu, sigma):
 
     return mean, aleatoric, epistemic
 
+# Step 30 - beyond_one_gaussian_report
+def score_predictive(y, w, mu, sigma):
+    y = np.asarray(y, dtype=np.float64).reshape(-1)
+
+    nll = -float(np.mean(mixture_logpdf(y, w, mu, sigma)))
+    ks = float(pit_ks(pit_values(y, w, mu, sigma)))
+
+    interval90 = interval_report(
+        y, w, mu, sigma, levels=(0.9,)
+    )[0]
+
+    return {
+        "nll": float(nll),
+        "ks": float(ks),
+        "cov90": float(interval90["coverage"]),
+        "width90": float(interval90["width"])
+    }
+
+
+def beyond_one_gaussian_report(
+    seed=0, n=1000, n_small=200, n_test=5000, steps=1000
+):
+    t0 = time.time()
+
+    # ============================================================
+    # 1. Growing-noise regression experiment
+    # ============================================================
+
+    x_train, y_train, _, _ = make_growing_noise_data(
+        n, seed=seed
+    )
+
+    x_test, y_test, mu_true, sigma_true = make_growing_noise_data(
+        n_test, seed=10000 + seed
+    )
+
+    # Exact oracle NLL for the true conditional Gaussian.
+    oracle_series = float(np.mean(
+        0.5 * np.log(2.0 * np.pi * sigma_true**2)
+        + 0.5 * ((y_test - mu_true) / sigma_true)**2
+    ))
+
+    # Fixed-sigma Gaussian model.
+    fixed_predict = fit_fixed_sigma(
+        x_train, y_train, steps=steps, seed=seed
+    )
+    w_fixed, mu_fixed, sigma_fixed = fixed_predict(x_test)
+
+    fixed_score = score_predictive(
+        y_test, w_fixed, mu_fixed, sigma_fixed
+    )
+
+    # Heteroskedastic two-head Gaussian model.
+    two_head_predict = fit_two_head(
+        x_train, y_train, steps=steps, seed=seed
+    )
+    w_two, mu_two, sigma_two = two_head_predict(x_test)
+
+    two_head_score = score_predictive(
+        y_test, w_two, mu_two, sigma_two
+    )
+
+    # Coverage by input region.
+    region_edges = [-20, 0, 20, 40, 60.01]
+
+    fixed_regions = coverage_by_region(
+        x_test, y_test,
+        w_fixed, mu_fixed, sigma_fixed,
+        edges=region_edges
+    )
+
+    two_head_regions = coverage_by_region(
+        x_test, y_test,
+        w_two, mu_two, sigma_two,
+        edges=region_edges
+    )
+
+    # RMSE of predicted noise scale and conditional mean.
+    sigma_rmse = float(np.sqrt(np.mean(
+        (sigma_two[:, 0] - sigma_true)**2
+    )))
+
+    mean_rmse = {
+        "fixed": float(np.sqrt(np.mean(
+            (mu_fixed[:, 0] - mu_true)**2
+        ))),
+        "two_head": float(np.sqrt(np.mean(
+            (mu_two[:, 0] - mu_true)**2
+        )))
+    }
+
+    series = {
+        "oracle": float(oracle_series),
+        "fixed": fixed_score,
+        "two_head": two_head_score,
+        "fixed_regions": fixed_regions,
+        "two_head_regions": two_head_regions,
+        "sigma_rmse": sigma_rmse,
+        "mean_rmse": mean_rmse
+    }
+
+    # ============================================================
+    # 2. One-to-many inverse problem
+    # ============================================================
+
+    x_inv, y_inv = make_inverse_data(n, seed=seed)
+
+    x_inv_test, y_inv_test = make_inverse_data(
+        n_test, seed=10000 + seed
+    )
+
+    oracle_inverse = float(inverse_oracle_nll(x_inv_test))
+
+    oracle_set_length = float(
+        0.9 * np.mean(support_size(x_inv_test))
+    )
+
+    # One Gaussian.
+    gaussian_predict = fit_two_head(
+        x_inv, y_inv, steps=steps, seed=seed
+    )
+    wg, mug, sg = gaussian_predict(x_inv_test)
+
+    gaussian_score = score_predictive(
+        y_inv_test, wg, mug, sg
+    )
+
+    # Deep ensemble of three Gaussian models.
+    ensemble_predict = fit_ensemble(
+        lambda xa, ya, seed: fit_two_head(
+            xa, ya, steps=steps, seed=seed
+        ),
+        x_inv, y_inv, M=3, seed=seed
+    )
+
+    we, mue, se = ensemble_predict(x_inv_test)
+
+    ensemble_score = score_predictive(
+        y_inv_test, we, mue, se
+    )
+
+    # MC dropout Gaussian mixture.
+    dropout_model = fit_dropout(
+        x_inv, y_inv,
+        p=0.01,
+        steps=steps,
+        seed=seed
+    )
+
+    wd, mud, sd = mc_dropout_predict(
+        dropout_model, x_inv_test, S=30, seed=seed
+    )
+
+    dropout_score = score_predictive(
+        y_inv_test, wd, mud, sd
+    )
+
+    # Mixture of linear experts.
+    mole_model = fit_mole(
+        x_inv, y_inv, K=3, seed=seed
+    )
+
+    wm, mum, sm = mole_model["predict"](x_inv_test)
+
+    mole_score = score_predictive(
+        y_inv_test, wm, mum, sm
+    )
+
+    # Hierarchical mixture of experts.
+    hme_predict = fit_hme(
+        x_inv, y_inv,
+        steps=steps * 3 // 2,
+        seed=seed
+    )
+
+    wh, muh, sh = hme_predict(x_inv_test)
+
+    hme_score = score_predictive(
+        y_inv_test, wh, muh, sh
+    )
+
+    # Fit a separate MDN for each requested component count.
+    # fit_mdn returns a prediction function, not a dictionary.
+    mdn_models = {}
+
+    for K in (2, 3, 5):
+        mdn_models[K] = fit_mdn(
+            x_inv, y_inv,
+            K=K,
+            steps=steps,
+            seed=seed
+        )
+
+    mdn_scores = {}
+
+    for K in (2, 3, 5):
+        wk, muk, sk = mdn_models[K](x_inv_test)
+
+        mdn_scores[K] = score_predictive(
+            y_inv_test, wk, muk, sk
+        )
+
+    # Point prediction reports.
+    mole_points = point_report(
+        x_inv_test, y_inv_test, wm, mum
+    )
+
+    w3, mu3, sigma3 = mdn_models[3](x_inv_test)
+
+    mdn3_points = point_report(
+        x_inv_test, y_inv_test, w3, mu3
+    )
+
+    # Highest-density sets on the first 1500 test observations.
+    density_grid = np.linspace(-0.5, 1.5, 801)
+
+    gaussian_sets = density_set_report(
+        y_inv_test[:1500],
+        wg[:1500], mug[:1500], sg[:1500],
+        grid=density_grid,
+        level=0.9
+    )
+
+    mdn3_sets = density_set_report(
+        y_inv_test[:1500],
+        w3[:1500], mu3[:1500], sigma3[:1500],
+        grid=density_grid,
+        level=0.9
+    )
+
+    inverse = {
+        "oracle": oracle_inverse,
+        "oracle_set_length": oracle_set_length,
+        "gaussian": gaussian_score,
+        "ensemble_gaussian": ensemble_score,
+        "mc_dropout_gaussian": dropout_score,
+        "mole": mole_score,
+        "hme": hme_score,
+        "mdn": mdn_scores,
+        "points": {
+            "mole": mole_points,
+            "mdn3": mdn3_points
+        },
+        "sets": {
+            "gaussian": gaussian_sets,
+            "mdn3": mdn3_sets
+        }
+    }
+
+    # ============================================================
+    # 3. Small-data experiment with a hole in the training inputs
+    # ============================================================
+
+    x_small, y_small, _, _ = make_growing_noise_data(
+        n_small,
+        seed=20000 + seed,
+        gap=(10.0, 25.0)
+    )
+
+    # Use the no-gap test set from the first experiment.
+    inside = (x_test > 10.0) & (x_test < 25.0)
+    outside = ~inside
+
+    def small_model_report(w, mu, sigma):
+        nll_in = -float(np.mean(
+            mixture_logpdf(
+                y_test[inside],
+                w[inside], mu[inside], sigma[inside]
+            )
+        ))
+
+        nll_out = -float(np.mean(
+            mixture_logpdf(
+                y_test[outside],
+                w[outside], mu[outside], sigma[outside]
+            )
+        ))
+
+        interval_in = interval_report(
+            y_test[inside],
+            w[inside], mu[inside], sigma[inside],
+            levels=(0.9,)
+        )[0]
+
+        return {
+            "nll_out": float(nll_out),
+            "nll_in": float(nll_in),
+            "cov90_in": float(interval_in["coverage"])
+        }
+
+    # Single two-head model.
+    single_predict = fit_two_head(
+        x_small, y_small,
+        steps=steps,
+        seed=seed
+    )
+
+    w_single, mu_single, sigma_single = single_predict(x_test)
+
+    single_report = small_model_report(
+        w_single, mu_single, sigma_single
+    )
+
+    # Five-member deep ensemble.
+    small_ensemble_predict = fit_ensemble(
+        lambda xa, ya, seed: fit_two_head(
+            xa, ya, steps=steps, seed=seed
+        ),
+        x_small, y_small,
+        M=5,
+        seed=seed
+    )
+
+    we_s, mue_s, se_s = small_ensemble_predict(x_test)
+
+    ensemble_report = small_model_report(
+        we_s, mue_s, se_s
+    )
+
+    # Select dropout rate by held-out likelihood.
+    tuned = tune_dropout_rate(
+        x_small, y_small,
+        rates=(0.003, 0.01, 0.03),
+        val_frac=0.25,
+        S=20,
+        hidden=(32, 32),
+        steps=steps,
+        lr=0.01,
+        seed=seed
+    )
+
+    best_dropout_model = tuned["model"]
+    best_p = float(tuned["best_p"])
+
+    # MC dropout predictions.
+    w_mc, mu_mc, sigma_mc = mc_dropout_predict(
+        best_dropout_model,
+        x_test,
+        S=30,
+        seed=seed
+    )
+
+    mc_report = small_model_report(
+        w_mc, mu_mc, sigma_mc
+    )
+
+    # Deterministic weight-scaled predictions.
+    w_scaled, mu_scaled, sigma_scaled = weight_scaled_predict(
+        best_dropout_model, x_test
+    )
+
+    weight_scaled_report = small_model_report(
+        w_scaled, mu_scaled, sigma_scaled
+    )
+
+    # Epistemic uncertainty: variance of component means.
+    _, _, epistemic_ensemble = uncertainty_split(
+        we_s, mue_s, se_s
+    )
+
+    _, _, epistemic_mc = uncertainty_split(
+        w_mc, mu_mc, sigma_mc
+    )
+
+    ensemble_report["epistemic_in"] = float(
+        np.sqrt(np.mean(epistemic_ensemble[inside]))
+    )
+
+    ensemble_report["epistemic_out"] = float(
+        np.sqrt(np.mean(epistemic_ensemble[outside]))
+    )
+
+    mc_report["epistemic_in"] = float(
+        np.sqrt(np.mean(epistemic_mc[inside]))
+    )
+
+    mc_report["epistemic_out"] = float(
+        np.sqrt(np.mean(epistemic_mc[outside]))
+    )
+
+    small = {
+        "single": single_report,
+        "ensemble": ensemble_report,
+        "mc_dropout": mc_report,
+        "weight_scaled": weight_scaled_report,
+        "best_p": best_p
+    }
+
+    return {
+        "series": series,
+        "inverse": inverse,
+        "small": small,
+        "seconds": float(time.time() - t0)
+    }
+
