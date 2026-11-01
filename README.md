@@ -36,6 +36,7 @@ python scaffold.py
 - [x] **24.** fit_hme
 - [x] **25.** fit_dropout
 - [x] **26.** mc_dropout_predict
+- [x] **27.** tune_dropout_rate
 
 ---
 

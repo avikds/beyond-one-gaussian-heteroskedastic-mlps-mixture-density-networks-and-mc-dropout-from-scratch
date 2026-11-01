@@ -2629,3 +2629,78 @@ def mc_dropout_predict(model, xq, S=30, seed=0):
 
     return w, mu, sigma
 
+# Step 27 - tune_dropout_rate
+def tune_dropout_rate(
+    x, y, rates=(0.003, 0.01, 0.03), val_frac=0.25,
+    S=20, hidden=(32, 32), steps=1000, lr=0.01, seed=0
+):
+    x = np.asarray(x, dtype=np.float64).reshape(-1)
+    y = np.asarray(y, dtype=np.float64).reshape(-1)
+
+    if x.shape != y.shape or x.size < 2:
+        raise ValueError("x and y must have the same length of at least 2")
+    if not 0.0 < val_frac < 1.0:
+        raise ValueError("val_frac must be between 0 and 1")
+    if not rates:
+        raise ValueError("rates must contain at least one dropout rate")
+
+    # Create a reproducible training/validation split.
+    rng = np.random.default_rng([seed, 5])
+    idx = rng.permutation(len(x))
+    n_val = int(len(x) * val_frac)
+
+    if n_val < 1 or n_val >= len(x):
+        raise ValueError("val_frac must produce nonempty training and validation sets")
+
+    val_idx = idx[:n_val]
+    train_idx = idx[n_val:]
+
+    x_train, y_train = x[train_idx], y[train_idx]
+    x_val, y_val = x[val_idx], y[val_idx]
+
+    scores = {}
+
+    # Evaluate each dropout rate in the supplied order.
+    for i, p in enumerate(rates):
+        p = float(p)
+
+        model = fit_dropout(
+            x_train,
+            y_train,
+            p=p,
+            hidden=hidden,
+            steps=steps,
+            lr=lr,
+            seed=seed
+        )
+
+        w, mu, sigma = mc_dropout_predict(
+            model,
+            x_val,
+            S=S,
+            seed=seed
+        )
+
+        nll = -float(np.mean(mixture_logpdf(y_val, w, mu, sigma)))
+        scores[p] = nll
+
+    # min() preserves the earlier rate when scores are tied.
+    best_p = min(scores, key=scores.get)
+
+    # Refit using all available observations.
+    refit_model = fit_dropout(
+        x,
+        y,
+        p=best_p,
+        hidden=hidden,
+        steps=steps,
+        lr=lr,
+        seed=seed
+    )
+
+    return {
+        "best_p": float(best_p),
+        "scores": {p: float(score) for p, score in scores.items()},
+        "model": refit_model
+    }
+
