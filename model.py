@@ -317,8 +317,7 @@ class Standardizer:
         return mu, sigma
 
 # Step 5 - softplus
-from tinygrad import Tensor
-
+from tinygrad import Tensor, TinyJit, dtypes
 
 def softplus(a):
     """
@@ -1291,69 +1290,36 @@ def fit_fixed_sigma(x, y, hidden=(32, 32), steps=1000, lr=0.01, seed=0):
 
 # Step 15 - fit_two_head
 def gaussian_head_params(o, sy):
-    """
-    Convert two-headed Gaussian network outputs into
-    Gaussian parameters in the original target units.
-
-    Parameters
-    ----------
-    o : np.ndarray
-        Network output of shape (n, 2).
-    sy : Standardizer
-        Target standardizer.
-
-    Returns
-    -------
-    tuple
-        (w, mu, sigma), each of shape (n, 1).
-    """
-
     o = np.asarray(o, dtype=np.float64)
 
-    # First output: predicted mean.
     mu_z = o[:, 0:1]
 
-    # Second output: predicted standard deviation.
-    # Use numerically stable NumPy Softplus.
+    # Stable NumPy Softplus plus the minimum scale.
     sigma_z = np.logaddexp(0.0, o[:, 1:2]) + SIGMA_FLOOR
 
-    # Convert predictions to original target units.
     mu, sigma = sy.scale_density(mu_z, sigma_z)
 
-    # One Gaussian component per input.
     w = np.ones_like(mu, dtype=np.float64)
 
     return w, mu, sigma
 
 
 def fit_two_head(x, y, hidden=(32, 32), steps=1000, lr=0.01, seed=0):
-    """
-    Train a heteroskedastic Gaussian MLP with a shared
-    backbone and separate mean and standard-deviation heads.
 
-    Returns
-    -------
-    predict : callable
-        Returns (w, mu, sigma), each of shape (n, 1),
-        in original target units.
-    """
-
-    # Convert inputs to float64.
     x = np.asarray(x, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64)
 
-    # Step 1: Standardize inputs and targets.
+    # Standardize inputs and targets.
     sx = Standardizer(x)
     sy = Standardizer(y)
 
     X = sx.forward(x)[:, None]
     Y = sy.forward(y)
 
-    # Step 2: Create a neural network with two output units.
+    # Shared backbone with two output heads.
     net = DenseNet(1, hidden, 2, seed=seed)
 
-    # Initialize the output bias:
-    # mean = 0 and standard deviation = 1 in standardized units.
+    # Initialize mean = 0 and sigma = 1.
     initial_bias = Tensor(
         [0.0, float(softplus_inv(1.0))],
         dtype=dtypes.float32
@@ -1361,20 +1327,16 @@ def fit_two_head(x, y, hidden=(32, 32), steps=1000, lr=0.01, seed=0):
 
     net.layers[-1][1].assign(initial_bias).realize()
 
-    # Step 3: Define the Gaussian negative log-likelihood.
+    # Gaussian negative log-likelihood.
     def loss_fn(xb, yb, masks):
-
         o = net(xb)
 
-        # Mean output.
         mu_z = o[:, 0]
-
-        # Standard-deviation output.
         sigma_z = softplus(o[:, 1]) + SIGMA_FLOOR
 
         return gaussian_nll(yb, mu_z, sigma_z)
 
-    # Train using the corrected TinyJit training loop.
+    # Train using the corrected training loop.
     fit(
         net.parameters(),
         loss_fn,
@@ -1385,18 +1347,14 @@ def fit_two_head(x, y, hidden=(32, 32), steps=1000, lr=0.01, seed=0):
         seed=seed
     )
 
-    # Step 4: Define prediction function.
+    # Prediction function.
     def predict(xq):
-
         xq = np.asarray(xq, dtype=np.float64).reshape(-1)
 
-        # Standardize query inputs.
         Xq = sx.forward(xq)[:, None]
 
-        # Obtain network predictions.
         o = net.np_forward(Xq)
 
-        # Convert to original Gaussian parameters.
         return gaussian_head_params(o, sy)
 
     return predict
