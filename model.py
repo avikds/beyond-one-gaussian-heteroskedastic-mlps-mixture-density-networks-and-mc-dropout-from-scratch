@@ -661,10 +661,8 @@ class Adam:
 def fit(params, loss_fn, X, Y, steps=1000, lr=0.01,
         mask_fn=None, seed=0):
 
-    params = list(params)
     opt = Adam(params)
 
-    # Prepare training tensors.
     xb = Tensor(
         np.asarray(X, dtype=np.float32)
     ).contiguous().realize()
@@ -676,19 +674,32 @@ def fit(params, loss_fn, X, Y, steps=1000, lr=0.01,
     rng = np.random.default_rng([seed, 3])
     history = []
 
+    # Use TinyJit only when there are no dropout masks.
+    if mask_fn is None:
+
+        def gradient_step(xb, yb):
+            loss = loss_fn(xb, yb, None)
+            grads = loss.gradient(*params)
+
+            for g in grads:
+                g.realize()
+
+            loss.realize()
+            return loss, *grads
+
+        gradient_step = TinyJit(gradient_step)
+
     for t in range(steps):
 
-        # Cosine learning-rate schedule.
         lr_value = lr * 0.5 * (
             1.0 + math.cos(math.pi * t / steps)
         )
 
         lr_t = Tensor(
             [lr_value],
-            dtype=dtypes.float32
+            dtype=dtypes.float32,
         ).contiguous().realize()
 
-        # Generate fresh dropout masks if required.
         if mask_fn is not None:
             mask_arrays = mask_fn(rng, len(X))
 
@@ -698,28 +709,23 @@ def fit(params, loss_fn, X, Y, steps=1000, lr=0.01,
                 ).contiguous().realize()
                 for mask in mask_arrays
             )
+
+            # Eager forward and backward pass for dropout.
+            loss = loss_fn(xb, yb, masks)
+            grads = loss.gradient(*params)
+
+            for g in grads:
+                g.realize()
+
+            loss.realize()
+
         else:
-            masks = None
+            outputs = gradient_step(xb, yb)
+            loss = outputs[0]
+            grads = outputs[1:]
 
-        # Forward pass and loss.
-        loss = loss_fn(xb, yb, masks)
-
-        # Calculate all parameter gradients.
-        grads = loss.gradient(*params)
-
-        # IMPORTANT:
-        # Realize each gradient independently rather than
-        # compiling all gradient outputs in one schedule.
-        for grad in grads:
-            grad.realize()
-
-        # Realize the scalar loss separately.
-        loss.realize()
-
-        # Update parameters using Adam.
         opt.step(grads, lr_t)
 
-        # Store periodic loss values.
         if t % 500 == 0 or t == steps - 1:
             history.append(
                 (int(t), float(loss.numpy()))
@@ -2238,4 +2244,88 @@ def fit_hme(x, y, steps=1500, lr=0.01, seed=0):
         return w, mu, sigma
 
     return predict
+
+# Step 25 - fit_dropout
+def dropout_masks(rng, n, hidden, p):
+    if not 0.0 <= p < 1.0:
+        raise ValueError("p must be in the range [0, 1)")
+    if n < 1:
+        raise ValueError("n must be positive")
+
+    # Generate one independent Bernoulli mask per hidden layer.
+    # A unit is retained with probability 1 - p.
+    masks = [
+        (rng.random((n, h)) >= p).astype(np.float32)
+        for h in hidden
+    ]
+
+    return masks
+
+
+def fit_dropout(x, y, p, hidden=(32, 32), steps=1000, lr=0.01, seed=0):
+    x = np.asarray(x, dtype=np.float64).reshape(-1)
+    y = np.asarray(y, dtype=np.float64).reshape(-1)
+
+    if x.shape != y.shape:
+        raise ValueError("x and y must have the same number of observations")
+    if x.size == 0:
+        raise ValueError("Training data cannot be empty")
+    if not 0.0 <= p < 1.0:
+        raise ValueError("p must be in the range [0, 1)")
+
+    # Standardize inputs and targets.
+    sx = Standardizer(x)
+    sy = Standardizer(y)
+
+    X = sx.forward(x)[:, None]
+    Y = sy.forward(y)
+
+    # Two-headed network: mean and raw standard deviation.
+    net = DenseNet(
+        d_in=1,
+        hidden=hidden,
+        d_out=2,
+        seed=seed,
+    )
+
+    # Initialize the mean bias to zero and the scale bias
+    # so that the initial standardized scale is approximately one.
+    initial_bias = Tensor(
+        [0.0, float(softplus_inv(1.0))],
+        dtype=dtypes.float32,
+    ).contiguous().realize()
+
+    net.layers[-1][1].assign(initial_bias).realize()
+
+    # Define the Gaussian NLL with dropout applied to hidden units.
+    def loss_fn(xb, yb, masks):
+        output = net(xb, masks=masks)
+
+        mu_z = output[:, 0]
+        sigma_z = softplus(output[:, 1]) + SIGMA_FLOOR
+
+        return gaussian_nll(yb, mu_z, sigma_z)
+
+    # Generate a fresh set of per-example masks for every training step.
+    def mask_fn(rng, n):
+        return dropout_masks(rng, n, hidden, p)
+
+    # Train using the existing optimizer and training loop.
+    fit(
+        params=net.parameters(),
+        loss_fn=loss_fn,
+        X=X,
+        Y=Y,
+        steps=steps,
+        lr=lr,
+        mask_fn=mask_fn,
+        seed=seed,
+    )
+
+    return {
+        "net": net,
+        "sx": sx,
+        "sy": sy,
+        "p": float(p),
+    }
 
