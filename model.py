@@ -645,10 +645,10 @@ class Adam:
 def fit(params, loss_fn, X, Y, steps=1000, lr=0.01,
         mask_fn=None, seed=0):
 
-    # Initialize Adam.
+    # Initialize the hand-written Adam optimizer.
     opt = Adam(params)
 
-    # Convert training data to realized float32 tensors.
+    # Convert training data into realized float32 tensors.
     xb = Tensor(
         np.asarray(X, dtype=np.float32)
     ).contiguous().realize()
@@ -657,32 +657,27 @@ def fit(params, loss_fn, X, Y, steps=1000, lr=0.01,
         np.asarray(Y, dtype=np.float32)
     ).contiguous().realize()
 
-    # Dedicated random stream for dropout.
+    # Dedicated random generator for dropout masks.
     rng = np.random.default_rng([seed, 3])
 
+    # Define one full-batch training step.
     def step(xb, yb, lr_t, *masks):
 
-        current_masks = tuple(masks) if mask_fn is not None else None
+        current_masks = (
+            tuple(masks) if mask_fn is not None else None
+        )
 
-        # Calculate loss.
+        # Forward pass and loss calculation.
         loss = loss_fn(xb, yb, current_masks)
 
-        # Calculate gradients.
+        # Automatic differentiation.
         grads = loss.gradient(*params)
 
-        # IMPORTANT: Realize each gradient separately.
-        # Avoid combining the loss and all gradients into one schedule.
-        for g in grads:
-            g.realize()
-
-        # Realize the loss separately, before updating parameters.
-        loss.realize()
-
-        # Perform Adam update.
+        # Calculate Adam updates.
         updated = opt.step(grads, lr_t)
 
-        # Realize the optimizer updates.
-        Tensor.realize(*updated)
+        # Realize the loss and all optimizer updates together.
+        Tensor.realize(loss, *updated)
 
         return loss
 
@@ -703,8 +698,9 @@ def fit(params, loss_fn, X, Y, steps=1000, lr=0.01,
             dtype=dtypes.float32
         ).contiguous().realize()
 
-        # Generate fresh dropout masks.
+        # Generate fresh dropout masks for each step.
         if mask_fn is not None:
+
             mask_arrays = mask_fn(rng, len(X))
 
             mask_tensors = tuple(
@@ -713,14 +709,16 @@ def fit(params, loss_fn, X, Y, steps=1000, lr=0.01,
                 ).contiguous().realize()
                 for mask in mask_arrays
             )
+
         else:
             mask_tensors = ()
 
-        # Execute training step.
+        # Execute the JIT-compiled training step.
         loss = step(xb, yb, lr_t, *mask_tensors)
 
-        # Record loss periodically.
+        # Record loss every 500 steps and at the final step.
         if t % 500 == 0 or t == steps - 1:
+
             history.append(
                 (int(t), float(loss.numpy()))
             )
