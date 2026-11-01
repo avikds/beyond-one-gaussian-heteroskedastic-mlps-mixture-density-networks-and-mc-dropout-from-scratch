@@ -35,6 +35,7 @@ python scaffold.py
 - [x] **23.** density_set_report
 - [x] **24.** fit_hme
 - [x] **25.** fit_dropout
+- [x] **26.** mc_dropout_predict
 
 ---
 

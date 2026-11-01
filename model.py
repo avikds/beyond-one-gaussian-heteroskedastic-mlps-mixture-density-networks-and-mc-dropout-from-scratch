@@ -2569,3 +2569,63 @@ def fit_dropout(x, y, p, hidden=(32, 32), steps=1000, lr=0.01, seed=0):
         "p": float(p),
     }
 
+# Step 26 - mc_dropout_predict
+def weight_scaled_predict(model, xq):
+    xq = np.asarray(xq, dtype=np.float64).reshape(-1)
+
+    # Standardize inputs.
+    Xq = model["sx"].forward(xq)[:, None]
+
+    # One deterministic forward pass using the expected dropout scaling.
+    out = model["net"].np_forward(
+        Xq,
+        scale=1.0 - model["p"]
+    )
+
+    # Convert predictions back to the original target units.
+    return gaussian_head_params(out, model["sy"])
+
+
+def mc_dropout_predict(model, xq, S=30, seed=0):
+    if S < 1:
+        raise ValueError("S must be at least 1")
+
+    xq = np.asarray(xq, dtype=np.float64).reshape(-1)
+
+    # Standardize inputs.
+    Xq = model["sx"].forward(xq)[:, None]
+    n = len(xq)
+
+    rng = np.random.default_rng([seed, 4])
+
+    weights = []
+    means = []
+    sigmas = []
+
+    # Each pass uses a fresh set of dropout masks.
+    for _ in range(S):
+        masks = dropout_masks(
+            rng,
+            n,
+            model["net"].hidden,
+            model["p"]
+        )
+
+        out = model["net"].np_forward(
+            Xq,
+            masks=masks
+        )
+
+        w, mu, sigma = gaussian_head_params(out, model["sy"])
+
+        weights.append(mu)
+        means.append(mu)
+        sigmas.append(sigma)
+
+    # Each stochastic pass contributes equally to the mixture.
+    w = np.full((n, S), 1.0 / S, dtype=np.float64)
+    mu = np.concatenate(means, axis=1)
+    sigma = np.concatenate(sigmas, axis=1)
+
+    return w, mu, sigma
+
